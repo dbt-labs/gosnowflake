@@ -44,6 +44,20 @@ var defaultLinuxCacheDirConf = []cacheDirConf{
 	{envVar: "HOME", pathSegments: []string{".cache", "snowflake"}},
 }
 
+var defaultMacCacheDirConf = []cacheDirConf{
+	{envVar: credCacheDirEnv, pathSegments: []string{}},
+	// NOTE: Caches/Snowflake/Credentials is used instead of simply Caches/Snowflake/
+	// so that more restrictive permissions can be set on the directory.
+	{envVar: "HOME", pathSegments: []string{"Library", "Caches", "Snowflake", "Credentials"}},
+}
+
+func defaultUnixCacheDirConf() []cacheDirConf {
+	if runtime.GOOS == "darwin" {
+		return defaultMacCacheDirConf
+	}
+	return defaultLinuxCacheDirConf
+}
+
 type secureTokenSpec struct {
 	host, user string
 	tokenType  tokenType
@@ -95,14 +109,14 @@ var credentialsStorage = newSecureStorageManager()
 
 func newSecureStorageManager() secureStorageManager {
 	switch runtime.GOOS {
-	case "linux":
+	case "linux", "darwin":
 		ssm, err := newFileBasedSecureStorageManager()
 		if err != nil {
 			logger.Debugf("failed to create credentials cache dir. %v", err)
 			return newNoopSecureStorageManager()
 		}
 		return &threadSafeSecureStorageManager{&sync.Mutex{}, ssm}
-	case "darwin", "windows":
+	case "windows":
 		return &threadSafeSecureStorageManager{&sync.Mutex{}, newKeyringBasedSecureStorageManager()}
 	default:
 		logger.Warnf("OS %v does not support credentials cache", runtime.GOOS)
@@ -115,7 +129,7 @@ type fileBasedSecureStorageManager struct {
 }
 
 func newFileBasedSecureStorageManager() (*fileBasedSecureStorageManager, error) {
-	credDirPath, err := buildCredCacheDirPath(defaultLinuxCacheDirConf)
+	credDirPath, err := buildCredCacheDirPath(defaultUnixCacheDirConf())
 	if err != nil {
 		return nil, err
 	}
