@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -282,7 +283,13 @@ func doAuthenticateByExternalBrowser(
 	}
 
 	if err = openBrowser(loginURL); err != nil {
-		return authenticateByExternalBrowserResult{nil, nil, err}
+	    msg := fmt.Sprintf("[Snowflake] Failed to launch browser automatically: %v", err)
+	    fmt.Fprintf(os.Stderr, "\n%s\n", msg)
+	    fmt.Fprintf(os.Stderr, "[Snowflake] To authenticate, please manually open the following URL in your browser:\n\n%s\n\n", loginURL)
+	    fmt.Fprintf(os.Stderr, "[Snowflake] Waiting for you to complete authentication in your browser...\n")
+
+	    logger.WithContext(ctx).Infof("%s", msg)
+	    logger.WithContext(ctx).Infof("Manual authentication URL: %s", loginURL)
 	}
 
 	encodedSamlResponseChan := make(chan string)
