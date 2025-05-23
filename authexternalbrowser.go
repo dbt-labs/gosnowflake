@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -351,7 +352,19 @@ type externalBrowserSamlResponseProvider struct {
 }
 
 func (e externalBrowserSamlResponseProvider) run(url string) error {
-	return openBrowser(url)
+	if err := openBrowser(url); err != nil {
+		msg := fmt.Sprintf("[Snowflake] Failed to launch browser automatically: %v", err)
+		fmt.Fprintf(os.Stderr, "\n%s\n", msg)
+		fmt.Fprintf(os.Stderr, "[Snowflake] To authenticate, please manually open the following URL in your browser:\n\n%s\n\n", url)
+		fmt.Fprintf(os.Stderr, "[Snowflake] Waiting for you to complete authentication in your browser...\n")
+
+		logger.Infof("%s", msg)
+		logger.Infof("Manual authentication URL: %s", url)
+
+		return nil
+	}
+
+	return nil
 }
 
 var defaultSamlResponseProvider = func() samlResponseProvider {
