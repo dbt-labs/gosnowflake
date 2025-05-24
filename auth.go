@@ -420,7 +420,11 @@ func authenticate(
 	}
 	if sessionParameters[clientStoreTemporaryCredential] == true {
 		token := respd.Data.IDToken
-		credentialsStorage.setCredential(newIDTokenSpec(sc.cfg.Host, sc.cfg.User), token)
+		// XXX: for some reason, token is empty here some times and we
+		// don't want to clear the cache, so let's skip it if it's empty
+		if token != "" {
+			credentialsStorage.setCredential(newIDTokenSpec(sc.cfg.Host, sc.cfg.User), token)
+		}
 	}
 	return &respd.Data, nil
 }
