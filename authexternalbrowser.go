@@ -268,8 +268,8 @@ func doAuthenticateByExternalBrowser(
 	defer l.Close()
 
 	callbackPort := l.Addr().(*net.TCPAddr).Port
-	/* prevent infinite hang if the user doesn't open the browser or never completes the redirect
-	Apparently net.Listener.Accept() does not observe ctx cancelation by default */
+	// prevent infinite hang if the user doesn't open the browser or never completes the redirect
+	// Apparently net.Listener.Accept() does not observe ctx cancelation by default
 	_ = l.SetDeadline(time.Now().Add(5 * time.Minute))
 
 	var loginURL string
