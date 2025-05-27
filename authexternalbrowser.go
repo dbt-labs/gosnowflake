@@ -52,23 +52,27 @@ func buildResponse(body string) (bytes.Buffer, error) {
 
 // This opens a socket that listens on all available unicast
 // and any anycast IP addresses locally. By specifying "0", we are
-// able to bind to a free port.
-func createLocalTCPListener(port int) (*net.TCPListener, error) {
+// able to bind to a free port. Specifying a fixed port may cause race condition.
+func createLocalTCPListener(ctx context.Context, port int) (*net.TCPListener, error) {
 	logger.Debugf("creating local TCP listener on port %v", port)
-	allAddressesListener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%v", port))
+
+	var lc net.ListenConfig
+	allAddressesListener, err := lc.Listen(ctx, "tcp", fmt.Sprintf("0.0.0.0:%v", port))
+
 	if err != nil {
-		logger.Warnf("error while setting up 0.0.0.0 listener: %v", err)
+		logger.Warnf("unable to bind to 0.0.0.0:%v — possible permission or firewall issue: %v", port, err)
 		return nil, err
 	}
-	logger.Debug("Closing 0.0.0.0 tcp listener")
+	logger.Debugf("Successfully bound to 0.0.0.0:%v; closing test listener", port)
+
 	if err := allAddressesListener.Close(); err != nil {
 		logger.Errorf("error while closing TCP listener. %v", err)
 		return nil, err
 	}
 
-	l, err := net.Listen("tcp", fmt.Sprintf("localhost:%v", port))
+	l, err := lc.Listen(ctx, "tcp", fmt.Sprintf("localhost:%v", port))
 	if err != nil {
-		logger.Warnf("error while setting up listener: %v", err)
+		logger.Warnf("Error while setting up listener. Unable to bind to localhost:%v: %v", port, err)
 		return nil, err
 	}
 
@@ -241,8 +245,16 @@ func authenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, au
 //   - user authenticates at the IDP, and is redirected to Snowflake
 //   - Snowflake directs the user back to the driver
 //   - authenticate is complete!
-func doAuthenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, authenticator string, application string, account string, user string, disableConsoleLogin ConfigBool) authenticateByExternalBrowserResult {
-	l, err := createLocalTCPListener(0)
+func doAuthenticateByExternalBrowser(
+	ctx context.Context,
+	sr *snowflakeRestful,
+	authenticator string,
+	application string,
+	account string,
+	user string,
+	disableConsoleLogin ConfigBool,
+) authenticateByExternalBrowserResult {
+	l, err := createLocalTCPListener(ctx, 0)
 	if err != nil {
 		return authenticateByExternalBrowserResult{nil, nil, err}
 	}
