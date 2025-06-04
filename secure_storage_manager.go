@@ -251,24 +251,28 @@ func (ssm *fileBasedSecureStorageManager) withCacheFile(action func(*os.File)) {
 }
 
 func (ssm *fileBasedSecureStorageManager) setCredential(tokenSpec *secureTokenSpec, value string) {
+	// never clobber with an empty token
+	if value == "" {
+		return
+	}
 	credentialsKey, err := tokenSpec.buildKey()
 	if err != nil {
 		logger.Warn(err)
 		return
 	}
 
-	ssm.withLock(func(cacheFile *os.File) {
+	ssm.withFlockFile(func(cacheFile *os.File) {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
-			logger.Warnf("Error while reading cache file. %v", err)
+			logger.Warnf("Error while reading cache file: %v", err)
 			return
 		}
 		tokens := ssm.getTokens(credCache)
 		tokens[credentialsKey] = value
 		credCache["tokens"] = tokens
-		err = ssm.writeTemporaryCacheFile(credCache, cacheFile)
-		if err != nil {
-			logger.Warnf("Set credential failed. Unable to write cache. %v", err)
+
+		if err := ssm.writeTemporaryCacheFile(credCache, cacheFile); err != nil {
+			logger.Warnf("Set credential failed: %v", err)
 		}
 	})
 }
@@ -357,7 +361,7 @@ func (ssm *fileBasedSecureStorageManager) getCredential(tokenSpec *secureTokenSp
 	}
 
 	ret := ""
-	ssm.withLock(func(cacheFile *os.File) {
+	ssm.withFlockFile(func(cacheFile *os.File) {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
@@ -443,7 +447,7 @@ func (ssm *fileBasedSecureStorageManager) deleteCredential(tokenSpec *secureToke
 		return
 	}
 
-	ssm.withLock(func(cacheFile *os.File) {
+	ssm.withFlockFile(func(cacheFile *os.File) {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
