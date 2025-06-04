@@ -251,6 +251,15 @@ func (ssm *fileBasedSecureStorageManager) withCacheFile(action func(*os.File)) {
 }
 
 func (ssm *fileBasedSecureStorageManager) setCredential(tokenSpec *secureTokenSpec, value string) {
+	// Skip caching when the MFA token is empty.
+	// This can occur in successful auth scenarios where:
+	// 1. Snowflake reuses a valid recent MFA session and returns an empty "mfaToken".
+	// 2. The MFA provider (e.g., Duo) determines that no challenge is needed.
+	if value == "" {
+		logger.Debug("No token provided. Will not create or modify existing mfa token cache file.")
+		return
+	}
+
 	credentialsKey, err := tokenSpec.buildKey()
 	if err != nil {
 		logger.Warn(err)
@@ -260,15 +269,15 @@ func (ssm *fileBasedSecureStorageManager) setCredential(tokenSpec *secureTokenSp
 	ssm.withLock(func(cacheFile *os.File) {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
-			logger.Warnf("Error while reading cache file. %v", err)
+			logger.Warnf("Error while reading cache file: %v", err)
 			return
 		}
 		tokens := ssm.getTokens(credCache)
 		tokens[credentialsKey] = value
 		credCache["tokens"] = tokens
-		err = ssm.writeTemporaryCacheFile(credCache, cacheFile)
-		if err != nil {
-			logger.Warnf("Set credential failed. Unable to write cache. %v", err)
+
+		if err := ssm.writeTemporaryCacheFile(credCache, cacheFile); err != nil {
+			logger.Warnf("Set credential failed: %v", err)
 		}
 	})
 }
