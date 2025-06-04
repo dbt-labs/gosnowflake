@@ -251,17 +251,21 @@ func (ssm *fileBasedSecureStorageManager) withCacheFile(action func(*os.File)) {
 }
 
 func (ssm *fileBasedSecureStorageManager) setCredential(tokenSpec *secureTokenSpec, value string) {
-	// never clobber with an empty token
+	// Skip caching when the MFA token is empty.
+	// This can occur in successful auth scenarios where:
+	// 1. Snowflake reuses a valid recent MFA session and returns an empty "mfaToken".
+	// 2. The MFA provider (e.g., Duo) determines that no challenge is needed.
 	if value == "" {
 		return
 	}
+
 	credentialsKey, err := tokenSpec.buildKey()
 	if err != nil {
 		logger.Warn(err)
 		return
 	}
 
-	ssm.withFlockFile(func(cacheFile *os.File) {
+	ssm.withLock(func(cacheFile *os.File) {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file: %v", err)
@@ -361,7 +365,7 @@ func (ssm *fileBasedSecureStorageManager) getCredential(tokenSpec *secureTokenSp
 	}
 
 	ret := ""
-	ssm.withFlockFile(func(cacheFile *os.File) {
+	ssm.withLock(func(cacheFile *os.File) {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
@@ -447,7 +451,7 @@ func (ssm *fileBasedSecureStorageManager) deleteCredential(tokenSpec *secureToke
 		return
 	}
 
-	ssm.withFlockFile(func(cacheFile *os.File) {
+	ssm.withLock(func(cacheFile *os.File) {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
