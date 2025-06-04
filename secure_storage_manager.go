@@ -256,6 +256,7 @@ func (ssm *fileBasedSecureStorageManager) setCredential(tokenSpec *secureTokenSp
 	// 1. Snowflake reuses a valid recent MFA session and returns an empty "mfaToken".
 	// 2. The MFA provider (e.g., Duo) determines that no challenge is needed.
 	if value == "" {
+		logger.Debug("No token provided. Will not create or modify existing mfa token cache file.")
 		return
 	}
 
