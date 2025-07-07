@@ -264,7 +264,6 @@ func doAuthenticateByExternalBrowser(
 	password string,
 	disableConsoleLogin ConfigBool,
 ) authenticateByExternalBrowserResult {
-
 	l, err := createLocalTCPListener(ctx, 0)
 	if err != nil {
 		return authenticateByExternalBrowserResult{nil, nil, err}
@@ -280,7 +279,9 @@ func doAuthenticateByExternalBrowser(
 	} else {
 		loginURL, proofKey, err = getLoginURL(sr, user, callbackPort)
 	}
+
 	if err != nil {
+		// Multiple SAML way to do authentication via console login
 		return authenticateByExternalBrowserResult{nil, nil, err}
 	}
 
