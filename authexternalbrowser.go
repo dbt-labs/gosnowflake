@@ -1,7 +1,6 @@
 package gosnowflake
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -18,7 +17,6 @@ import (
 	"time"
 
 	"github.com/pkg/browser"
-	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -380,56 +378,28 @@ func waitForSamlResponse(ctx context.Context, l net.Listener, application string
 // canonical mode OFF, echo ON
 func manualTokenFallback() (string, error) {
 	fd := int(os.Stdin.Fd())
-
-	// Save current settings, switch to raw (= ICANON off, ECHO off).
-	orig, err := term.GetState(fd)
-	if err == nil && term.IsTerminal(fd) {
-		if _, err := term.MakeRaw(fd); err != nil {
-			return "", fmt.Errorf("cannot switch tty to raw mode: %w", err)
-		}
-		// --- re-enable ECHO so the user sees the paste ----------------
-		if tio, e := unix.IoctlGetTermios(fd, unix.TIOCGETA); e == nil {
-			tio.Lflag |= unix.ECHO    // show what the user types
-			tio.Lflag |= unix.ECHONL  // echo the newline, too
-			tio.Lflag |= unix.ISIG    // let Ctrl-C, Ctrl-Z, Ctrl-\ generate signals
-			_ = unix.IoctlSetTermios(fd, unix.TIOCSETA, tio)
-		}
-		defer term.Restore(fd, orig)
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return "", fmt.Errorf("cannot switch tty to raw mode: %w", err)
 	}
+	defer term.Restore(fd, oldState)
 
-	reader := bufio.NewReader(os.Stdin)
+	// Now safe to run the VT-100 line editor.
+	t := term.NewTerminal(os.Stdin, "Paste redirect URL: ")
+
 	for {
-		fmt.Print("\n\nPaste redirect URL (blank line aborts): ")
+	        // ReadLine echoes & handles Ctrl-C/Z
+		line, err := t.ReadLine()
+		if err == io.EOF { return "", errors.New("user aborted") }
+		if err != nil   { return "", err }
 
-		// readLineRaw preserves every byte up to NL/CR.
-		line, err := readLineRaw(reader)
-		if err != nil {
-			return "", err
-		}
-		if line == "" {
-			return "", errors.New("no URL provided")
-		}
+		if line == ""   { return "", errors.New("no URL provided") }
 
 		if token, ok := extractToken(line); ok {
 			return token, nil
 		}
-		fmt.Println("Token not found. Please try again.\n")
+		fmt.Fprintln(t, "Token not found. Please try again.")
 	}
-}
-
-func readLineRaw(r *bufio.Reader) (string, error) {
-	var buf []byte
-	for {
-		b, err := r.ReadByte()
-		if err != nil {
-			return "", err
-		}
-		if b == '\n' || b == '\r' {
-			break
-		}
-		buf = append(buf, b)
-	}
-	return strings.TrimSpace(string(buf)), nil
 }
 
 func extractToken(s string) (string, bool) {
