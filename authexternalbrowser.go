@@ -1,6 +1,7 @@
 package gosnowflake
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -8,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/pkg/browser"
+	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 const (
@@ -264,6 +266,7 @@ func doAuthenticateByExternalBrowser(
 	password string,
 	disableConsoleLogin ConfigBool,
 ) authenticateByExternalBrowserResult {
+
 	l, err := createLocalTCPListener(ctx, 0)
 	if err != nil {
 		return authenticateByExternalBrowserResult{nil, nil, err}
@@ -272,52 +275,95 @@ func doAuthenticateByExternalBrowser(
 
 	callbackPort := l.Addr().(*net.TCPAddr).Port
 
-	var loginURL string
-	var proofKey string
+	var loginURL, proofKey string
 	if disableConsoleLogin == ConfigBoolTrue {
-		// Gets the IDP URL and Proof Key from Snowflake
-		loginURL, proofKey, err = getIdpURLProofKey(ctx, sr, authenticator, application, account, user, callbackPort)
+		loginURL, proofKey, err = getIdpURLProofKey(
+			ctx, sr, authenticator, application, account, user, callbackPort)
 	} else {
-		// Multiple SAML way to do authentication via console login
 		loginURL, proofKey, err = getLoginURL(sr, user, callbackPort)
 	}
-
 	if err != nil {
 		return authenticateByExternalBrowserResult{nil, nil, err}
 	}
 
-	if err = openBrowser(loginURL); err != nil {
-	    msg := fmt.Sprintf("[Snowflake] Failed to launch browser automatically: %v", err)
-	    fmt.Fprintf(os.Stderr, "\n%s\n", msg)
-	    fmt.Fprintf(os.Stderr, "[Snowflake] To authenticate, please manually open the following URL in your browser:\n\n%s\n\n", loginURL)
-	    fmt.Fprintf(os.Stderr, "[Snowflake] Waiting for you to complete authentication in your browser...\n")
+	fmt.Printf(`
+    Initiating login request in browser with your identity provider.
+	`)
+	if err := openBrowser(loginURL); err == nil {
+		// ---- AUTOMATIC PATH
+		// Block until the browser redirect hits the listener.
+		token, readErr := waitForSamlResponse(ctx, l, application)
+		if readErr != nil {
+			return authenticateByExternalBrowserResult{nil, nil, readErr}
+		}
 
-	    logger.WithContext(ctx).Infof("%s", msg)
-	    logger.WithContext(ctx).Infof("Manual authentication URL: %s", loginURL)
+		unescaped, err := url.QueryUnescape(token)
+		if err != nil {
+			logger.WithContext(ctx).Errorf("unable to unescape saml response: %v", err)
+			return authenticateByExternalBrowserResult{nil, nil, err}
+		}
+		return authenticateByExternalBrowserResult{[]byte(unescaped), []byte(proofKey), nil}
+
+	} else {
+		// ----- MANUAL FALLBACK
+		logger.WithContext(ctx).Warnf("external-browser auth: could not open browser: %v", err)
+		logger.WithContext(ctx).Warnf("manual authentication URL: %s", loginURL)
+
+		// Listener not needed; close it so Snowflake cannot connect.
+		_ = l.Close()
+
+		fmt.Printf(`
+    %s
+
+    We were unable to open a browser window for you.
+    Please open the URL above manually, complete the sign-in, then paste
+    the URL you were finally redirected to here.`, loginURL)
+    		fmt.Printf("\n")
+
+		token, perr := manualTokenFallback()
+		if perr != nil {
+			return authenticateByExternalBrowserResult{
+				nil, nil, &SnowflakeError{
+					Number:      ErrFailedToGetExternalBrowserResponse,
+					SQLState:    SQLStateConnectionRejected,
+					Message:     "Unable to open a browser in this environment and the provided URL contained no token",
+					MessageArgs: []interface{}{perr},
+				},
+			}
+		}
+
+		unescaped, err := url.QueryUnescape(token)
+		if err != nil {
+			logger.WithContext(ctx).Errorf("unable to unescape saml response: %v", err)
+			return authenticateByExternalBrowserResult{nil, nil, err}
+		}
+		return authenticateByExternalBrowserResult{[]byte(unescaped), []byte(proofKey), nil}
 	}
+}
 
-	encodedSamlResponseChan := make(chan string)
-	errChan := make(chan error)
+func waitForSamlResponse(ctx context.Context, l net.Listener, application string) (string, error) {
+	encodedChan := make(chan string, 1)
+	errChan := make(chan error, 1)
 
-	var encodedSamlResponse string
-	var errFromGoroutine error
-	conn, err := l.Accept()
-	if err != nil {
-		logger.WithContext(ctx).Errorf("unable to accept connection. err: %v", err)
-		log.Fatal(err)
-	}
-	go func(c net.Conn) {
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			errChan <- err
+			return
+		}
+		defer conn.Close()
+
 		var buf bytes.Buffer
 		total := 0
-		encodedSamlResponse := ""
-		var errAccept error
+		var encoded string
+		var acceptErr error
+
 		for {
 			b := make([]byte, bufSize)
-			n, err := c.Read(b)
+			n, err := conn.Read(b)
 			if err != nil {
 				if err != io.EOF {
-					logger.WithContext(ctx).Infof("error reading from socket. err: %v", err)
-					errAccept = &SnowflakeError{
+					acceptErr = &SnowflakeError{
 						Number:      ErrFailedToGetExternalBrowserResponse,
 						SQLState:    SQLStateConnectionRejected,
 						Message:     errMsgFailedToGetExternalBrowserResponse,
@@ -329,41 +375,98 @@ func doAuthenticateByExternalBrowser(
 			total += n
 			buf.Write(b)
 			if n < bufSize {
-				// We successfully read all data
-				s := string(buf.Bytes()[:total])
-				encodedSamlResponse, errAccept = getTokenFromResponse(s)
+				encoded, acceptErr = getTokenFromResponse(string(buf.Bytes()[:total]))
 				break
 			}
 			buf.Grow(bufSize)
 		}
-		if encodedSamlResponse != "" {
+
+		if encoded != "" {
 			body := fmt.Sprintf(samlSuccessHTML, application)
-			httpResponse, err := buildResponse(body)
-			if err != nil && errAccept == nil {
-				errAccept = err
+			httpResp, err := buildResponse(body)
+			if err != nil && acceptErr == nil {
+				acceptErr = err
 			}
-			if _, err = c.Write(httpResponse.Bytes()); err != nil && errAccept == nil {
-				errAccept = err
+			if _, err = conn.Write(httpResp.Bytes()); err != nil && acceptErr == nil {
+				acceptErr = err
 			}
 		}
-		if err := c.Close(); err != nil {
-			logger.Warnf("error while closing browser connection. %v", err)
+
+		if acceptErr != nil {
+			errChan <- acceptErr
+			return
 		}
-		encodedSamlResponseChan <- encodedSamlResponse
-		errChan <- errAccept
-	}(conn)
+		encodedChan <- encoded
+	}()
 
-	encodedSamlResponse = <-encodedSamlResponseChan
-	errFromGoroutine = <-errChan
+	select {
+	case s := <-encodedChan:
+		return s, nil
+	case e := <-errChan:
+		return "", e
+	}
+}
 
-	if errFromGoroutine != nil {
-		return authenticateByExternalBrowserResult{nil, nil, errFromGoroutine}
+// canonical mode OFF, echo ON
+func manualTokenFallback() (string, error) {
+	fd := int(os.Stdin.Fd())
+
+	// Save current settings, switch to raw (= ICANON off, ECHO off).
+	orig, err := term.GetState(fd)
+	if err == nil && term.IsTerminal(fd) {
+		if _, err := term.MakeRaw(fd); err != nil {
+			return "", fmt.Errorf("cannot switch tty to raw mode: %w", err)
+		}
+		// --- re-enable ECHO so the user sees the paste ----------------
+		if tio, e := unix.IoctlGetTermios(fd, unix.TIOCGETA); e == nil {
+			tio.Lflag |= unix.ECHO    // show what the user types
+			tio.Lflag |= unix.ECHONL  // echo the newline, too
+			tio.Lflag |= unix.ISIG    // let Ctrl-C, Ctrl-Z, Ctrl-\ generate signals
+			_ = unix.IoctlSetTermios(fd, unix.TIOCSETA, tio)
+		}
+		defer term.Restore(fd, orig)
 	}
 
-	escapedSamlResponse, err := url.QueryUnescape(encodedSamlResponse)
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("\n\nPaste redirect URL (blank line aborts): ")
+
+		// readLineRaw preserves every byte up to NL/CR.
+		line, err := readLineRaw(reader)
+		if err != nil {
+			return "", err
+		}
+		if line == "" {
+			return "", errors.New("no URL provided")
+		}
+
+		if token, ok := extractToken(line); ok {
+			return token, nil
+		}
+		fmt.Println("Token not found. Please try again.\n")
+	}
+}
+
+func readLineRaw(r *bufio.Reader) (string, error) {
+	var buf []byte
+	for {
+		b, err := r.ReadByte()
+		if err != nil {
+			return "", err
+		}
+		if b == '\n' || b == '\r' {
+			break
+		}
+		buf = append(buf, b)
+	}
+	return strings.TrimSpace(string(buf)), nil
+}
+
+func extractToken(s string) (string, bool) {
+	u, err := url.Parse(s)
 	if err != nil {
-		logger.WithContext(ctx).Errorf("unable to unescape saml response. err: %v", err)
-		return authenticateByExternalBrowserResult{nil, nil, err}
+		return "", false
 	}
-	return authenticateByExternalBrowserResult{[]byte(escapedSamlResponse), []byte(proofKey), nil}
+	t := u.Query().Get("token")
+	return t, t != ""
 }
