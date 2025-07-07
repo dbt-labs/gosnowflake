@@ -278,16 +278,19 @@ func doAuthenticateByExternalBrowser(
 		return authenticateByExternalBrowserResult{nil, nil, err}
 	}
 
+	// Invoke SAML response provider (either auto-launch or manual token flow)
 	manualToken, err := defaultSamlResponseProvider().run(loginURL)
 	if err != nil {
 	    return authenticateByExternalBrowserResult{nil, nil, err}
 	}
 
-	// TODO(versusfacit): now that we have this caller indirection which upstream
-	// master does, we should ideally use complete branching paths rather than branching
-	// here off the return values
+	// TODO(versusfacit): Upstream now uses caller indirection. Preserve branching here
+	// until we unify upstream flow handling.
 	if manualToken != "" {
 	    // We're in manual/pasted path, skip listener
+	    // Listener not needed; close it so Snowflake cannot connect.
+	    _ = l.Close()
+
 	    unescaped, err := url.QueryUnescape(manualToken)
 	    if err != nil {
 		return authenticateByExternalBrowserResult{nil, nil, err}
@@ -441,7 +444,8 @@ func (e externalBrowserSamlResponseProvider) run(loginURL string) (string, error
 
 We were unable to open a browser window for you.
 Please open the URL above manually, complete the sign-in, then paste
-the URL you were finally redirected to here.`, loginURL)
+the URL you were finally redirected to here.
+`, loginURL)
     fmt.Printf("\n")
 
     token, perr := manualTokenFallback()
