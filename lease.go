@@ -14,10 +14,10 @@ import (
 )
 
 const (
-	leaseSep       = '\n'                // field delimiter inside *.lck
+	leaseSep       = '\n' // field delimiter inside *.lck
 	pollInterval   = 200 * time.Millisecond
-	defaultTTL     = 5 * time.Minute    // browser-flow timeout
-	defaultTimeout = 30 * time.Second   // how long a waiter will block
+	defaultTTL     = 5 * time.Minute  // browser-flow timeout
+	defaultTimeout = 30 * time.Second // how long a waiter will block
 )
 
 // Lease represents an on-disk, cross-process mutex.

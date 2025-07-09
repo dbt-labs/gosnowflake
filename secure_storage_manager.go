@@ -95,7 +95,7 @@ func lookupCacheDir(envVar string, segs ...string) (string, error) {
 
 	// reject if root is a symlink (prevents pointing at someone else's dir)
 	if info.Mode()&os.ModeSymlink != 0 {
-	    return "", fmt.Errorf("%s must not be a symlink", root)
+		return "", fmt.Errorf("%s must not be a symlink", root)
 	}
 
 	dir := filepath.Join(append([]string{root}, segs...)...)
@@ -113,7 +113,6 @@ func buildCredCacheDirPath(confs []cacheDirConf) (string, error) {
 	}
 	return "", errors.New("no credential cache directory found")
 }
-
 
 /*
  * Token Cache Helpers
@@ -218,9 +217,14 @@ type tsStore struct {
 	s  Storage
 }
 
-func newThreadSafe(s Storage) Storage      { return &tsStore{s: s} }
-func (t *tsStore) Acquire() (Lock, error)  { t.mu.Lock(); l, e := t.s.Acquire(); t.mu.Unlock(); return l, e }
-func (t *tsStore) Release(l Lock) error    { t.mu.Lock(); e := t.s.Release(l); t.mu.Unlock(); return e }
+func newThreadSafe(s Storage) Storage { return &tsStore{s: s} }
+func (t *tsStore) Acquire() (Lock, error) {
+	t.mu.Lock()
+	l, e := t.s.Acquire()
+	t.mu.Unlock()
+	return l, e
+}
+func (t *tsStore) Release(l Lock) error { t.mu.Lock(); e := t.s.Release(l); t.mu.Unlock(); return e }
 func (t *tsStore) Get(l Lock, s *secureTokenSpec) (string, error) {
 	t.mu.Lock()
 	v, e := t.s.Get(l, s)
@@ -246,14 +250,15 @@ func (t *tsStore) Delete(l Lock, s *secureTokenSpec) error {
 
 type noopLock struct{}
 
-func (noopLock) release() error                                { return nil }
+func (noopLock) release() error { return nil }
+
 type noopStore struct{}
 
-func (noopStore) Acquire() (Lock, error)                       { return noopLock{}, nil }
-func (noopStore) Release(Lock) error                           { return nil }
-func (noopStore) Get(Lock, *secureTokenSpec) (string, error)   { return "", nil }
-func (noopStore) Set(Lock, *secureTokenSpec, string) error     { return nil }
-func (noopStore) Delete(Lock, *secureTokenSpec) error          { return nil }
+func (noopStore) Acquire() (Lock, error)                     { return noopLock{}, nil }
+func (noopStore) Release(Lock) error                         { return nil }
+func (noopStore) Get(Lock, *secureTokenSpec) (string, error) { return "", nil }
+func (noopStore) Set(Lock, *secureTokenSpec, string) error   { return nil }
+func (noopStore) Delete(Lock, *secureTokenSpec) error        { return nil }
 
 /*
  * Backend helpers

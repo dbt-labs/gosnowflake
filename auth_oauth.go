@@ -37,7 +37,7 @@ type oauthClient struct {
 	ctx    context.Context
 	cfg    *Config
 	client *http.Client
-	lock   Lock  // cross platform lease
+	lock   Lock // cross platform lease
 
 	port                int
 	redirectURITemplate string

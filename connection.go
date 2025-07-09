@@ -77,7 +77,7 @@ type snowflakeConn struct {
 	internal            InternalClient
 	queryContextCache   *queryContextCache
 	currentTimeProvider currentTimeProvider
-	cacheLock 	    Lock // cross-process lease
+	cacheLock           Lock // cross-process lease
 }
 
 var (
@@ -517,16 +517,20 @@ func (sc *snowflakeConn) GetQueryStatus(
 }
 
 func (sc *snowflakeConn) acquireCacheLock() error {
-    if sc.cacheLock != nil { return nil }
-    l, err := credentialsStorage.Acquire()
-    if err == nil { sc.cacheLock = l }
-    return err
+	if sc.cacheLock != nil {
+		return nil
+	}
+	l, err := credentialsStorage.Acquire()
+	if err == nil {
+		sc.cacheLock = l
+	}
+	return err
 }
 func (sc *snowflakeConn) releaseCacheLock() {
-    if sc.cacheLock != nil {
-        _ = credentialsStorage.Release(sc.cacheLock)
-        sc.cacheLock = nil
-    }
+	if sc.cacheLock != nil {
+		_ = credentialsStorage.Release(sc.cacheLock)
+		sc.cacheLock = nil
+	}
 }
 
 // QueryArrowStream returns batches which can be queried for their raw arrow

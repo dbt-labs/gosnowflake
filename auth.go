@@ -589,7 +589,9 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 	//var consentCacheIdToken = true
 
 	// own the lease till end of method call
-	if err := sc.acquireCacheLock(); err != nil { return err }
+	if err := sc.acquireCacheLock(); err != nil {
+		return err
+	}
 	defer sc.releaseCacheLock()
 
 	if sc.cfg.Authenticator == AuthTypeExternalBrowser || sc.cfg.Authenticator == AuthTypeOAuthAuthorizationCode || sc.cfg.Authenticator == AuthTypeOAuthClientCredentials {

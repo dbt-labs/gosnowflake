@@ -310,9 +310,9 @@ func doAuthenticateByExternalBrowser(
 		_ = l.Close()
 
 		fmt.Printf("\t\n\t%s\n\n"+
-		    "\tWe were unable to open a browser window for you.\n"+
-		    "\tPlease open the URL above manually, complete the sign-in, then paste\n"+
-		    "\tthe URL you were finally redirected to here.\n\n", loginURL)
+			"\tWe were unable to open a browser window for you.\n"+
+			"\tPlease open the URL above manually, complete the sign-in, then paste\n"+
+			"\tthe URL you were finally redirected to here.\n\n", loginURL)
 
 		token, perr := manualTokenFallback()
 		if perr != nil {
@@ -414,12 +414,18 @@ func manualTokenFallback() (string, error) {
 	t := term.NewTerminal(os.Stdin, "Paste redirect URL: ")
 
 	for {
-	        // ReadLine echoes & handles Ctrl-C/Z
+		// ReadLine echoes & handles Ctrl-C/Z
 		line, err := t.ReadLine()
-		if err == io.EOF { return "", errors.New("user aborted") }
-		if err != nil   { return "", err }
+		if err == io.EOF {
+			return "", errors.New("user aborted")
+		}
+		if err != nil {
+			return "", err
+		}
 
-		if line == ""   { return "", errors.New("no URL provided") }
+		if line == "" {
+			return "", errors.New("no URL provided")
+		}
 
 		if token, ok := extractToken(line); ok {
 			return token, nil
