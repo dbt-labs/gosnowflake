@@ -37,6 +37,7 @@ type oauthClient struct {
 	ctx    context.Context
 	cfg    *Config
 	client *http.Client
+	lock   Lock  // cross platform lease
 
 	port                int
 	redirectURITemplate string
@@ -44,7 +45,7 @@ type oauthClient struct {
 	authorizationCodeProviderFactory func() authorizationCodeProvider
 }
 
-func newOauthClient(ctx context.Context, cfg *Config) (*oauthClient, error) {
+func newOauthClient(ctx context.Context, cfg *Config, lock Lock) (*oauthClient, error) {
 	port := 0
 	if cfg.OauthRedirectURI != "" {
 		logger.Debugf("Using oauthRedirectUri from config: %v", cfg.OauthRedirectURI)
@@ -88,11 +89,11 @@ type oauthBrowserResult struct {
 func (oauthClient *oauthClient) authenticateByOAuthAuthorizationCode() (string, error) {
 	accessTokenSpec := oauthClient.accessTokenSpec()
 	if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
-		if accessToken := credentialsStorage.getCredential(accessTokenSpec); accessToken != "" {
+		if accessToken, _ := credentialsStorage.Get(oauthClient.lock, accessTokenSpec); accessToken != "" {
 			logger.Debugf("Access token retrieved from cache")
 			return accessToken, nil
 		}
-		if refreshToken := credentialsStorage.getCredential(oauthClient.refreshTokenSpec()); refreshToken != "" {
+		if refreshToken, _ := credentialsStorage.Get(oauthClient.lock, oauthClient.refreshTokenSpec()); refreshToken != "" {
 			return "", &SnowflakeError{Number: ErrMissingAccessATokenButRefreshTokenPresent}
 		}
 	}
@@ -118,8 +119,8 @@ func (oauthClient *oauthClient) authenticateByOAuthAuthorizationCode() (string, 
 	case result := <-resultChan:
 		if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
 			logger.Debug("saving oauth access token in cache")
-			credentialsStorage.setCredential(oauthClient.accessTokenSpec(), result.accessToken)
-			credentialsStorage.setCredential(oauthClient.refreshTokenSpec(), result.refreshToken)
+			credentialsStorage.Set(oauthClient.lock, oauthClient.accessTokenSpec(), result.accessToken)
+			credentialsStorage.Set(oauthClient.lock, oauthClient.refreshTokenSpec(), result.refreshToken)
 		}
 		return result.accessToken, result.err
 	}
@@ -339,7 +340,7 @@ func (provider *browserBasedAuthorizationCodeProvider) createCodeVerifier() stri
 func (oauthClient *oauthClient) authenticateByOAuthClientCredentials() (string, error) {
 	accessTokenSpec := oauthClient.accessTokenSpec()
 	if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
-		if accessToken := credentialsStorage.getCredential(accessTokenSpec); accessToken != "" {
+		if accessToken, _ := credentialsStorage.Get(oauthClient.lock, accessTokenSpec); accessToken != "" {
 			return accessToken, nil
 		}
 	}
@@ -352,7 +353,7 @@ func (oauthClient *oauthClient) authenticateByOAuthClientCredentials() (string, 
 		return "", err
 	}
 	if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
-		credentialsStorage.setCredential(accessTokenSpec, token.AccessToken)
+		credentialsStorage.Set(oauthClient.lock, accessTokenSpec, token.AccessToken)
 	}
 	return token.AccessToken, nil
 }
@@ -375,7 +376,7 @@ func (oauthClient *oauthClient) refreshToken() error {
 		return nil
 	}
 	refreshTokenSpec := newOAuthRefreshTokenSpec(oauthClient.cfg.OauthTokenRequestURL, oauthClient.cfg.User)
-	refreshToken := credentialsStorage.getCredential(refreshTokenSpec)
+	refreshToken, _ := credentialsStorage.Get(oauthClient.lock, refreshTokenSpec)
 	if refreshToken == "" {
 		logger.Debug("no refresh token in cache, full flow must be run")
 		return nil
@@ -400,7 +401,7 @@ func (oauthClient *oauthClient) refreshToken() error {
 		if err != nil {
 			return err
 		}
-		credentialsStorage.deleteCredential(refreshTokenSpec)
+		credentialsStorage.Delete(oauthClient.lock, refreshTokenSpec)
 		return errors.New(string(respBody))
 	}
 	var tokenResponse tokenExchangeResponseBody
@@ -408,9 +409,9 @@ func (oauthClient *oauthClient) refreshToken() error {
 		return err
 	}
 	accessTokenSpec := oauthClient.accessTokenSpec()
-	credentialsStorage.setCredential(accessTokenSpec, tokenResponse.AccessToken)
+	credentialsStorage.Set(oauthClient.lock, accessTokenSpec, tokenResponse.AccessToken)
 	if tokenResponse.RefreshToken != "" {
-		credentialsStorage.setCredential(refreshTokenSpec, tokenResponse.RefreshToken)
+		credentialsStorage.Set(oauthClient.lock, refreshTokenSpec, tokenResponse.RefreshToken)
 	}
 	return nil
 }
