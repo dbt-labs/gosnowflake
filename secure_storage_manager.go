@@ -10,8 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -29,62 +27,19 @@ type Storage interface {
 const (
 	leaseDuration  = 5 * time.Minute // time of browser timeout
 	acquireTimeout = 30 * time.Second
-	pollInterval   = 200 * time.Millisecond
 )
 
-type fileLease struct{ path string; fh *os.File }
-
-func (l fileLease) release() error {
-	_ = l.fh.Close()
-	return os.Remove(l.path) // best-effort; stale leases self-expire
-}
+type fileLease struct{ *Lease }
 
 func acquireFileLease(dir string) (Lock, error) {
-	lockPath := filepath.Join(dir, credCacheFileName+".lck")
-	deadline := time.Now().Add(acquireTimeout)
-
-	for time.Now().Before(deadline) {
-		now := time.Now()
-		exp := now.Add(leaseDuration)
-
-		// try exclusive create
-		fh, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
-		if err == nil {
-			_, _ = fh.WriteString(strconv.FormatInt(exp.UnixNano(), 10))
-			return fileLease{lockPath, fh}, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("lock: %w", err)
-		}
-
-		// file exists
-		b, err := os.ReadFile(lockPath)
-		if err != nil {
-			time.Sleep(pollInterval)
-			continue
-		}
-		prevExp, _ := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
-		if now.Before(time.Unix(0, prevExp)) {
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		// steal stale lease
-		fh, err = os.OpenFile(lockPath, os.O_RDWR|os.O_TRUNC, 0o600)
-		if err != nil {
-			time.Sleep(pollInterval)
-			continue
-		}
-		_, err = fh.WriteString(strconv.FormatInt(exp.UnixNano(), 10))
-		if err != nil {
-			_ = fh.Close()
-			time.Sleep(pollInterval)
-			continue
-		}
-		return fileLease{lockPath, fh}, nil
+	l := NewLease(dir, credCacheFileName)
+	if err := l.Acquire(acquireTimeout, leaseDuration); err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("timeout acquiring %s", lockPath)
+	return fileLease{l}, nil
 }
+
+func (fl fileLease) release() error { return fl.Lease.Release() }
 
 /*
  * Cache directory helpers
