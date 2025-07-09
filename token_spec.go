@@ -1,5 +1,12 @@
 package gosnowflake
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+)
+
+// tokenType enumerates the different logical credentials we store.
 type tokenType string
 
 const (
@@ -16,6 +23,17 @@ type secureTokenSpec struct {
 
 func (t *secureTokenSpec) buildKey() (string, error) {
 	return buildCredentialsKey(t.host, t.user, t.tokenType)
+}
+
+func buildCredentialsKey(host, user string, t tokenType) (string, error) {
+	if host == "" {
+		return "", errors.New("host missing for token cache")
+	}
+	if user == "" {
+		return "", errors.New("user missing for token cache")
+	}
+	sum := sha256.Sum256([]byte(host + ":" + user + ":" + string(t)))
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func newIDTokenSpec(host, user string) *secureTokenSpec {
