@@ -39,12 +39,15 @@ func buildCredentialsKey(host, user string, t tokenType) (string, error) {
 func newIDTokenSpec(host, user string) *secureTokenSpec {
 	return &secureTokenSpec{host, user, idToken}
 }
+
 func newMfaTokenSpec(host, user string) *secureTokenSpec {
 	return &secureTokenSpec{host, user, mfaToken}
 }
+
 func newOAuthAccessTokenSpec(host, user string) *secureTokenSpec {
 	return &secureTokenSpec{host, user, oauthAccessToken}
 }
+
 func newOAuthRefreshTokenSpec(host, user string) *secureTokenSpec {
 	return &secureTokenSpec{host, user, oauthRefreshToken}
 }
