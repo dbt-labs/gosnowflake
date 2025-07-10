@@ -3,8 +3,7 @@ package gosnowflake
 import (
 	"bytes"
 	"crypto/rand"
-	"encoding/hex"
-	"errors"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -14,161 +13,192 @@ import (
 )
 
 const (
-	leaseSep       = '\n' // field delimiter inside *.lck
-	pollInterval   = 200 * time.Millisecond
-	defaultTTL     = 5 * time.Minute  // browser-flow timeout
-	defaultTimeout = 30 * time.Second // how long a waiter will block
+	gracePeriod                  = 10 * time.Millisecond
+	pollInterval                 = 200 * time.Millisecond
+	DefaultLeaseOperationTimeout = 30 * time.Second
 )
 
-// Lease represents an on-disk, cross-process mutex.
-// It is obtained via (*Lease).Acquire and released with (*Lease).Release.
+// File-based lease [1].
+//
+// [1] https://en.wikipedia.org/wiki/Lease_(computer_science)
 type Lease struct {
-	path  string
-	fh    *os.File // open handle that pins the inode
-	token string   // 128-bit random nonce proving authorship
+	path    string        // absolute path to the lease file
+	timeout time.Duration // how long to keep trying to acquire or renew the lease
 }
 
-func NewLease(dir, name string) *Lease {
-	return &Lease{path: filepath.Join(dir, name+".lck")}
+func NewLease(path string, timeout time.Duration) (*Lease, error) {
+	abspath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("lease: %w", err)
+	}
+	if timeout < time.Second {
+		timeout = time.Second // at least 1 second timeout
+	}
+	return &Lease{path: abspath, timeout: timeout}, nil
 }
 
-func randomToken() (string, error) {
+func genRandomLeaseId() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(b[:]), nil
+	return base64.RawURLEncoding.EncodeToString(b[:]), nil
 }
 
-func writeLease(f *os.File, exp time.Time, tok string) error {
-	if _, err := fmt.Fprintf(f, "%d%c%s%c",
-		exp.UnixNano(), leaseSep, tok, leaseSep); err != nil {
-		return err
-	}
-	return f.Sync()
-}
-
-func parseLease(b []byte) (exp time.Time, tok string, err error) {
-	parts := bytes.SplitN(b, []byte{leaseSep}, 3)
-	if len(parts) < 2 {
-		return time.Time{}, "", errors.New("corrupt lease")
-	}
-	n, err := strconv.ParseInt(string(parts[0]), 10, 64)
-	if err != nil {
-		return time.Time{}, "", err
-	}
-	return time.Unix(0, n), string(parts[1]), nil
-}
-
-func (l *Lease) Acquire(timeout, ttl time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	tok, err := randomToken()
-	if err != nil {
-		return err
-	}
-	l.token = tok
-
-	for time.Now().Before(deadline) {
-		now := time.Now()
-		exp := now.Add(ttl)
-
-		// 1. try to create the file exclusively -> fast path
-		fh, err := os.OpenFile(l.path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
-		if err == nil {
-			if err = writeLease(fh, exp, tok); err != nil {
-				fh.Close()
-				_ = os.Remove(l.path)
-				return err
-			}
-			l.fh = fh
-			return nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("lease: %w", err)
-		}
-
-		// 2. file exists - check whether it is stale
-		b, err := os.ReadFile(l.path)
-		if err != nil {
-			time.Sleep(pollInterval)
-			continue
-		}
-		prevExp, prevTok, err := parseLease(b)
-		if err != nil || now.Before(prevExp) { // busy or unreadable -> wait
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		// 3. attempt to steal the stale lease
-		fh, err = os.OpenFile(l.path, os.O_RDWR, 0)
-		if err != nil {
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		// re-read to verify nothing changed since our earlier read
-		cur, _ := io.ReadAll(fh)
-		curExp, curTok, err := parseLease(cur)
-		if err != nil || !now.After(curExp) || curTok != prevTok {
-			fh.Close()
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		// still stale - truncate in place, then write our data
-		if err = fh.Truncate(0); err != nil {
-			fh.Close()
-			time.Sleep(pollInterval)
-			continue
-		}
-		if _, err = fh.Seek(0, io.SeekStart); err != nil {
-			fh.Close()
-			time.Sleep(pollInterval)
-			continue
-		}
-		if err = writeLease(fh, exp, tok); err != nil {
-			fh.Close()
-			time.Sleep(pollInterval)
-			continue
-		}
-		l.fh = fh
-		return nil
-	}
-	return fmt.Errorf("timeout acquiring %s", l.path)
-}
-
-// Release closes the FD and deletes the lock file **only** if we
-// are still the owner (token matches).  Best-effort.
-func (l *Lease) Release() error {
-	if l.fh != nil {
-		_ = l.fh.Close()
-		l.fh = nil
-	}
-
-	b, err := os.ReadFile(l.path)
-	if err != nil {
-		return nil // already gone
-	}
-	_, tok, _ := parseLease(b)
-	if tok == l.token {
+// Update the contents of the lease file with the given leaseId and expiry.
+func (l *Lease) write(leaseId *string, expiry time.Time, asNewFile bool) error {
+	if !asNewFile {
 		_ = os.Remove(l.path)
 	}
-	return nil
+	flags := os.O_WRONLY | os.O_TRUNC | os.O_CREATE | os.O_EXCL // fail if file already exists
+	f, err := os.OpenFile(l.path, flags, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(f, "%s\r\n%d\r\n", *leaseId, expiry.UnixMilli()); err != nil {
+		return err
+	}
+	return f.Close()
 }
 
-// Renew extends the expiry by ttl, keeping the same token.  Callers that may
-// run > defaultTTL should spawn a goroutine that calls Renew every ttl/2.
-// This should be safe to call even if the lease was already stolen (no-op).
-func (l *Lease) Renew(ttl time.Duration) error {
-	if l.fh == nil {
-		return errors.New("lease not held")
+// Read the current lease ID and expiry time from the lease file.
+func (l *Lease) read() (string, time.Time, error) {
+	f, err := os.OpenFile(l.path, os.O_RDONLY, 0)
+	if os.IsNotExist(err) {
+		return "", time.Time{}, nil // no lease file
 	}
-	exp := time.Now().Add(ttl)
-	if _, err := l.fh.Seek(0, io.SeekStart); err != nil {
-		return err
+	// read the file contents into a small buffer
+	data := make([]byte, 0, 512)
+	for {
+		n, err := f.Read(data[len(data):cap(data)])
+		data = data[:len(data)+n]
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			break
+		}
+
+		if len(data) >= cap(data) {
+			// lease file is too large (unexpected), delete it
+			_ = f.Close()
+			_ = os.Remove(l.path)
+			return "", time.Time{}, nil // as if it never existed
+		}
 	}
-	if err := l.fh.Truncate(0); err != nil {
-		return err
+	if err != nil {
+		_ = f.Close()
+		return "", time.Time{}, err
 	}
-	return writeLease(l.fh, exp, l.token)
+	// parse the lease file contents
+	parts := bytes.SplitN(data, []byte{'\r', '\n'}, 3)
+	if len(parts) < 2 {
+		// corrupt lease file, delete it
+		_ = f.Close()
+		_ = os.Remove(l.path)
+		return "", time.Time{}, nil // as if it never existed
+	}
+	leaseId := string(parts[0])
+	expiryMillis, parseErr := strconv.ParseInt(string(parts[1]), 10, 64)
+	if parseErr != nil {
+		// corrupt lease file, delete it
+		_ = f.Close()
+		_ = os.Remove(l.path)
+		return "", time.Time{}, nil // as if it never existed
+	}
+	sec := expiryMillis / 1000
+	nsec := (expiryMillis % 1000) * 1_000_000
+	expiry := time.Unix(sec, nsec)
+	_ = f.Close()
+	return leaseId, expiry, nil
+}
+
+func (l *Lease) Acquire(ttl time.Duration) (string, error) {
+	newLeaseId, err := genRandomLeaseId()
+	if err != nil {
+		return "", fmt.Errorf("lease: %w", err)
+	}
+
+	deadline := time.Now().Add(l.timeout)
+	for time.Now().Before(deadline) {
+		leaseId, expiry, err := l.read()
+		if err != nil {
+			time.Sleep(pollInterval)
+			continue
+		}
+		// 1. empty lease file
+		if leaseId == "" {
+			newExpiry, asNewFile := time.Now().Add(ttl), true
+			err = l.write(&newLeaseId, newExpiry, asNewFile)
+			if err != nil {
+				time.Sleep(pollInterval)
+			}
+			continue
+		}
+		// 2. lease successfully written and read once
+		if leaseId == newLeaseId {
+			return newLeaseId, nil
+		}
+		// 3. current lease is still valid
+		if time.Now().Before(expiry) {
+			time.Sleep(pollInterval)
+			continue
+		}
+		// 4. existing lease is expired
+		newExpiry, asNewFile := time.Now().Add(ttl), false
+		err = l.write(&newLeaseId, newExpiry, asNewFile)
+		if err != nil {
+			time.Sleep(pollInterval)
+		}
+		continue
+	}
+
+	// final check after the timeout
+	leaseId, _, err := l.read()
+	if err == nil && leaseId == newLeaseId {
+		return newLeaseId, nil // successfully acquired the lease
+	}
+	return "", fmt.Errorf("timed out trying to acquire lease after %s: %s", l.timeout, l.path)
+}
+
+// Ensure the lease will be valid for at least the given ttl. Users should call
+// this periodically to keep the lease alive (e.g. every ttl/2 units of time).
+func (l *Lease) Renew(leaseId *string, ttl time.Duration) error {
+	now := time.Now()
+	newExpiry := now.Add(ttl)
+
+	deadline := now.Add(l.timeout)
+	for time.Now().Before(deadline) {
+		currentLeaseId, expiry, err := l.read()
+		if err != nil {
+			time.Sleep(pollInterval)
+			continue
+		}
+		// 1. lease is now different or expired
+		if currentLeaseId != *leaseId || time.Now().Add(gracePeriod).After(expiry) {
+			return fmt.Errorf("lease %s has expired: %s", *leaseId, l.path)
+		}
+		// 2. lease reached the desired expiry or later in the future
+		if expiry.Compare(newExpiry) >= 0 {
+			return nil
+		}
+		// 3. leaseId is still valid, so we can renew it
+		err = l.write(leaseId, newExpiry, false)
+		if err != nil {
+			time.Sleep(pollInterval)
+			continue // retry on write error
+		}
+	}
+	return fmt.Errorf("timed out trying to renew lease: %s", l.path)
+}
+
+// Makes an effort to release the given leaseId to help other processes acquire it sooner.
+func (l *Lease) Release(leaseId *string) {
+	currentLeaseId, expiry, err := l.read()
+	if currentLeaseId == "" || err != nil {
+		return
+	}
+	if currentLeaseId == *leaseId && time.Now().Add(gracePeriod).Before(expiry) {
+		_ = os.Remove(l.path)
+	}
 }
