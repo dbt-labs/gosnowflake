@@ -139,7 +139,7 @@ func TestAuthenticationTimeout(t *testing.T) {
 }
 
 func Test_createLocalTCPListener(t *testing.T) {
-	listener, err := createLocalTCPListener(0)
+	listener, err := createLocalTCPListener(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("createLocalTCPListener() failed: %v", err)
 	}

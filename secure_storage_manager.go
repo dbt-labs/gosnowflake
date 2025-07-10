@@ -1,24 +1,22 @@
 package gosnowflake
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 const (
+	leaseTTL          = 10 * time.Second
+	shortLeaseTTL     = leaseTTL / 2
 	credCacheDirEnv   = "SF_TEMPORARY_CREDENTIAL_CACHE_DIR"
+	credLeaseFileName = "credential_cache.lease"
 	credCacheFileName = "credential_cache_v1.json"
 )
 
@@ -48,24 +46,24 @@ func defaultUnixCacheDirConf() []cacheDirConf {
 }
 
 type secureStorageManager interface {
-	setCredential(tokenSpec *secureTokenSpec, value string)
-	getCredential(tokenSpec *secureTokenSpec) string
-	deleteCredential(tokenSpec *secureTokenSpec)
+	acquireLease() (string, error)
+	setCredential(leaseId *string, tokenSpec *secureTokenSpec, value string)
+	getCredential(leaseId *string, tokenSpec *secureTokenSpec) (string, error)
+	deleteCredential(leaseId *string, tokenSpec *secureTokenSpec)
+	releaseLease(leaseId *string)
 }
 
 var credentialsStorage = newSecureStorageManager()
 
 func newSecureStorageManager() secureStorageManager {
 	switch runtime.GOOS {
-	case "linux", "darwin":
+	case "linux", "darwin", "windows":
 		ssm, err := newFileBasedSecureStorageManager()
 		if err != nil {
 			logger.Debugf("failed to create credentials cache dir. %v", err)
 			return newNoopSecureStorageManager()
 		}
-		return &threadSafeSecureStorageManager{&sync.Mutex{}, ssm}
-	case "windows":
-		return &threadSafeSecureStorageManager{&sync.Mutex{}, newKeyringBasedSecureStorageManager()}
+		return ssm
 	default:
 		logger.Warnf("OS %v does not support credentials cache", runtime.GOOS)
 		return newNoopSecureStorageManager()
@@ -74,6 +72,7 @@ func newSecureStorageManager() secureStorageManager {
 
 type fileBasedSecureStorageManager struct {
 	credDirPath string
+	lease       *Lease
 }
 
 func newFileBasedSecureStorageManager() (*fileBasedSecureStorageManager, error) {
@@ -81,8 +80,13 @@ func newFileBasedSecureStorageManager() (*fileBasedSecureStorageManager, error) 
 	if err != nil {
 		return nil, err
 	}
+	lease, err := NewLease(filepath.Join(credDirPath, credLeaseFileName), DefaultLeaseOperationTimeout)
+	if err != nil {
+		return nil, err
+	}
 	ssm := &fileBasedSecureStorageManager{
 		credDirPath: credDirPath,
+		lease:       lease,
 	}
 	return ssm, nil
 }
@@ -145,22 +149,25 @@ func (ssm *fileBasedSecureStorageManager) getTokens(data map[string]any) map[str
 	return tokens
 }
 
-func (ssm *fileBasedSecureStorageManager) withLock(action func(cacheFile *os.File)) {
-	err := ssm.lockFile()
-	if err != nil {
-		logger.Warnf("Unable to lock cache. %v", err)
-		return
-	}
-	defer ssm.unlockFile()
-
-	ssm.withCacheFile(action)
+func (ssm *fileBasedSecureStorageManager) acquireLease() (string, error) {
+	return ssm.lease.Acquire(leaseTTL)
 }
 
-func (ssm *fileBasedSecureStorageManager) withCacheFile(action func(*os.File)) {
+func (ssm *fileBasedSecureStorageManager) withLease(leaseId *string, action func(cacheFile *os.File)) error {
+	err := ssm.lease.Renew(leaseId, shortLeaseTTL)
+	if err != nil {
+		logger.Warnf("Unable to lease cache. %v", err)
+		return err
+	}
+
+	return ssm.withCacheFile(action)
+}
+
+func (ssm *fileBasedSecureStorageManager) withCacheFile(action func(*os.File)) error {
 	cacheFile, err := os.OpenFile(ssm.credFilePath(), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		logger.Warnf("cannot access %v. %v", ssm.credFilePath(), err)
-		return
+		return err
 	}
 	defer func(file *os.File) {
 		if err := file.Close(); err != nil {
@@ -180,25 +187,26 @@ func (ssm *fileBasedSecureStorageManager) withCacheFile(action func(*os.File)) {
 
 	if err := ensureFileOwner(cacheFile); err != nil {
 		logger.Warnf("failed to ensure owner for temporary cache file. %v", err)
-		return
+		return err
 	}
 	if err := ensureFilePermissions(cacheFile, 0600); err != nil {
 		logger.Warnf("failed to ensure permission for temporary cache file. %v", err)
-		return
+		return err
 	}
 	if err := ensureFileOwner(cacheDir); err != nil {
 		logger.Warnf("failed to ensure owner for temporary cache dir. %v", err)
-		return
+		return err
 	}
 	if err := ensureFilePermissions(cacheDir, 0700|os.ModeDir); err != nil {
 		logger.Warnf("failed to ensure permission for temporary cache dir. %v", err)
-		return
+		return err
 	}
 
 	action(cacheFile)
+	return nil
 }
 
-func (ssm *fileBasedSecureStorageManager) setCredential(tokenSpec *secureTokenSpec, value string) {
+func (ssm *fileBasedSecureStorageManager) setCredential(leaseId *string, tokenSpec *secureTokenSpec, value string) {
 	// Skip caching when the MFA token is empty.
 	// This can occur in successful auth scenarios where:
 	// 1. Snowflake reuses a valid recent MFA session and returns an empty "mfaToken".
@@ -214,7 +222,7 @@ func (ssm *fileBasedSecureStorageManager) setCredential(tokenSpec *secureTokenSp
 		return
 	}
 
-	ssm.withLock(func(cacheFile *os.File) {
+	_ = ssm.withLease(leaseId, func(cacheFile *os.File) {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file: %v", err)
@@ -230,91 +238,90 @@ func (ssm *fileBasedSecureStorageManager) setCredential(tokenSpec *secureTokenSp
 	})
 }
 
-func (ssm *fileBasedSecureStorageManager) lockPath() string {
-	return filepath.Join(ssm.credDirPath, credCacheFileName+".lck")
-}
+// func (ssm *fileBasedSecureStorageManager) lockPath() string {
+// 	return filepath.Join(ssm.credDirPath, credCacheFileName+".lck")
+// }
 
-func (ssm *fileBasedSecureStorageManager) lockFile() error {
-	const numRetries = 10
-	const retryInterval = 100 * time.Millisecond
-	lockPath := ssm.lockPath()
+// func (ssm *fileBasedSecureStorageManager) lockFile() error {
+// 	const numRetries = 10
+// 	const retryInterval = 100 * time.Millisecond
+// 	lockPath := ssm.lockPath()
 
-	lockFile, err := os.Open(lockPath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("failed to open %v. err: %v", lockPath, err)
-	}
-	defer func() {
-		err = lockFile.Close()
-		if err != nil {
-			logger.Debugf("error while closing lock file. %v", err)
-		}
-	}()
+// 	lockFile, err := os.Open(lockPath)
+// 	if err != nil && !errors.Is(err, os.ErrNotExist) {
+// 		return fmt.Errorf("failed to open %v. err: %v", lockPath, err)
+// 	}
+// 	defer func() {
+// 		err = lockFile.Close()
+// 		if err != nil {
+// 			logger.Debugf("error while closing lock file. %v", err)
+// 		}
+// 	}()
 
-	if err == nil { // file exists
-		fileInfo, err := lockFile.Stat()
-		if err != nil {
-			return fmt.Errorf("failed to stat %v and determine if lock is stale. err: %v", lockPath, err)
-		}
+// 	if err == nil { // file exists
+// 		fileInfo, err := lockFile.Stat()
+// 		if err != nil {
+// 			return fmt.Errorf("failed to stat %v and determine if lock is stale. err: %v", lockPath, err)
+// 		}
 
-		ownerUID, err := provideFileOwner(lockFile)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		currentUser, err := user.Current()
-		if err != nil {
-			return err
-		}
-		if strconv.Itoa(int(ownerUID)) != currentUser.Uid {
-			return errors.New("incorrect owner of " + lockFile.Name())
-		}
+// 		ownerUID, err := provideFileOwner(lockFile)
+// 		if err != nil && !errors.Is(err, os.ErrNotExist) {
+// 			return err
+// 		}
+// 		currentUser, err := user.Current()
+// 		if err != nil {
+// 			return err
+// 		}
+// 		if strconv.Itoa(int(ownerUID)) != currentUser.Uid {
+// 			return errors.New("incorrect owner of " + lockFile.Name())
+// 		}
 
-		// removing stale lock
-		now := time.Now()
-		if fileInfo.ModTime().Add(time.Second).UnixNano() < now.UnixNano() {
-			logger.Debugf("removing credentials cache lock file, stale for %vms", (now.UnixNano()-fileInfo.ModTime().UnixNano())/1000/1000)
-			err = os.Remove(lockPath)
-			if err != nil {
-				return fmt.Errorf("failed to remove %v while trying to remove stale lock. err: %v", lockPath, err)
-			}
-		}
-	}
+// 		// removing stale lock
+// 		now := time.Now()
+// 		if fileInfo.ModTime().Add(time.Second).UnixNano() < now.UnixNano() {
+// 			logger.Debugf("removing credentials cache lock file, stale for %vms", (now.UnixNano()-fileInfo.ModTime().UnixNano())/1000/1000)
+// 			err = os.Remove(lockPath)
+// 			if err != nil {
+// 				return fmt.Errorf("failed to remove %v while trying to remove stale lock. err: %v", lockPath, err)
+// 			}
+// 		}
+// 	}
 
-	locked := false
-	for i := 0; i < numRetries; i++ {
-		err := os.Mkdir(lockPath, 0700)
-		if err != nil {
-			if errors.Is(err, os.ErrExist) {
-				time.Sleep(retryInterval)
-				continue
-			}
-			return fmt.Errorf("failed to create cache lock: %v, err: %v", lockPath, err)
-		}
-		locked = true
-		break
-	}
-	if !locked {
-		return fmt.Errorf("failed to lock cache. lockPath: %v", lockPath)
-	}
-	return nil
-}
+// 	locked := false
+// 	for i := 0; i < numRetries; i++ {
+// 		err := os.Mkdir(lockPath, 0700)
+// 		if err != nil {
+// 			if errors.Is(err, os.ErrExist) {
+// 				time.Sleep(retryInterval)
+// 				continue
+// 			}
+// 			return fmt.Errorf("failed to create cache lock: %v, err: %v", lockPath, err)
+// 		}
+// 		locked = true
+// 		break
+// 	}
+// 	if !locked {
+// 		return fmt.Errorf("failed to lock cache. lockPath: %v", lockPath)
+// 	}
+// 	return nil
+// }
+//
+// func (ssm *fileBasedSecureStorageManager) unlockFile() {
+// 	lockPath := ssm.lockPath()
+// 	err := os.Remove(lockPath)
+// 	if err != nil {
+// 		logger.Warnf("Failed to unlock cache lock: %v. %v", lockPath, err)
+// 	}
+// }
 
-func (ssm *fileBasedSecureStorageManager) unlockFile() {
-	lockPath := ssm.lockPath()
-	err := os.Remove(lockPath)
-	if err != nil {
-		logger.Warnf("Failed to unlock cache lock: %v. %v", lockPath, err)
-	}
-}
-
-func (ssm *fileBasedSecureStorageManager) getCredential(tokenSpec *secureTokenSpec) string {
+func (ssm *fileBasedSecureStorageManager) getCredential(leaseId *string, tokenSpec *secureTokenSpec) (string, error) {
 	credentialsKey, err := tokenSpec.buildKey()
 	if err != nil {
-		logger.Warn(err)
-		return ""
+		return "", err
 	}
 
 	ret := ""
-	ssm.withLock(func(cacheFile *os.File) {
+	err = ssm.withLease(leaseId, func(cacheFile *os.File) {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
@@ -332,7 +339,7 @@ func (ssm *fileBasedSecureStorageManager) getCredential(tokenSpec *secureTokenSp
 
 		ret = credStr
 	})
-	return ret
+	return ret, err
 }
 
 func (ssm *fileBasedSecureStorageManager) credFilePath() string {
@@ -375,14 +382,14 @@ func (ssm *fileBasedSecureStorageManager) readTemporaryCacheFile(cacheFile *os.F
 	return credentialsMap, nil
 }
 
-func (ssm *fileBasedSecureStorageManager) deleteCredential(tokenSpec *secureTokenSpec) {
+func (ssm *fileBasedSecureStorageManager) deleteCredential(leaseId *string, tokenSpec *secureTokenSpec) {
 	credentialsKey, err := tokenSpec.buildKey()
 	if err != nil {
 		logger.Warn(err)
 		return
 	}
 
-	ssm.withLock(func(cacheFile *os.File) {
+	_ = ssm.withLease(leaseId, func(cacheFile *os.File) {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
@@ -413,149 +420,30 @@ func (ssm *fileBasedSecureStorageManager) writeTemporaryCacheFile(cache map[stri
 	return nil
 }
 
-type keyringSecureStorageManager struct {
-}
-
-func newKeyringBasedSecureStorageManager() *keyringSecureStorageManager {
-	return &keyringSecureStorageManager{}
-}
-
-func (ssm *keyringSecureStorageManager) setCredential(tokenSpec *secureTokenSpec, value string) {
-	if value == "" {
-		logger.Debug("no token provided")
-	} else {
-		credentialsKey, err := tokenSpec.buildKey()
-		if err != nil {
-			logger.Warn(err)
-			return
-		}
-		if runtime.GOOS == "windows" {
-			ring, _ := keyring.Open(keyring.Config{
-				WinCredPrefix: strings.ToUpper(tokenSpec.host),
-				ServiceName:   strings.ToUpper(tokenSpec.user),
-			})
-			item := keyring.Item{
-				Key:  credentialsKey,
-				Data: []byte(value),
-			}
-			if err := ring.Set(item); err != nil {
-				logger.Debugf("Failed to write to Windows credential manager. Err: %v", err)
-			}
-		} else if runtime.GOOS == "darwin" {
-			ring, _ := keyring.Open(keyring.Config{
-				ServiceName: credentialsKey,
-			})
-			account := strings.ToUpper(tokenSpec.user)
-			item := keyring.Item{
-				Key:  account,
-				Data: []byte(value),
-			}
-			if err := ring.Set(item); err != nil {
-				logger.Debugf("Failed to write to keychain. Err: %v", err)
-			}
-		}
-	}
-}
-
-func (ssm *keyringSecureStorageManager) getCredential(tokenSpec *secureTokenSpec) string {
-	cred := ""
-	credentialsKey, err := tokenSpec.buildKey()
-	if err != nil {
-		logger.Warn(err)
-		return ""
-	}
-	if runtime.GOOS == "windows" {
-		ring, _ := keyring.Open(keyring.Config{
-			WinCredPrefix: strings.ToUpper(tokenSpec.host),
-			ServiceName:   strings.ToUpper(tokenSpec.user),
-		})
-		i, err := ring.Get(credentialsKey)
-		if err != nil {
-			logger.Debugf("Failed to read credentialsKey or could not find it in Windows Credential Manager. Error: %v", err)
-		}
-		cred = string(i.Data)
-	} else if runtime.GOOS == "darwin" {
-		ring, _ := keyring.Open(keyring.Config{
-			ServiceName: credentialsKey,
-		})
-		account := strings.ToUpper(tokenSpec.user)
-		i, err := ring.Get(account)
-		if err != nil {
-			logger.Debugf("Failed to find the item in keychain or item does not exist. Error: %v", err)
-		}
-		cred = string(i.Data)
-		if cred == "" {
-			logger.Debug("Returned credential is empty")
-		} else {
-			logger.Debug("Successfully read token. Returning as string")
-		}
-	}
-	return cred
-}
-
-func (ssm *keyringSecureStorageManager) deleteCredential(tokenSpec *secureTokenSpec) {
-	credentialsKey, err := tokenSpec.buildKey()
-	if err != nil {
-		logger.Warn(err)
-		return
-	}
-	if runtime.GOOS == "windows" {
-		ring, _ := keyring.Open(keyring.Config{
-			WinCredPrefix: strings.ToUpper(tokenSpec.host),
-			ServiceName:   strings.ToUpper(tokenSpec.user),
-		})
-		err := ring.Remove(string(credentialsKey))
-		if err != nil {
-			logger.Debugf("Failed to delete credentialsKey in Windows Credential Manager. Error: %v", err)
-		}
-	} else if runtime.GOOS == "darwin" {
-		ring, _ := keyring.Open(keyring.Config{
-			ServiceName: credentialsKey,
-		})
-		account := strings.ToUpper(tokenSpec.user)
-		err := ring.Remove(account)
-		if err != nil {
-			logger.Debugf("Failed to delete credentialsKey in keychain. Error: %v", err)
-		}
-	}
+func (ssm *fileBasedSecureStorageManager) releaseLease(leaseId *string) {
+	ssm.lease.Release(leaseId)
 }
 
 type noopSecureStorageManager struct {
+}
+
+func (ssm *noopSecureStorageManager) acquireLease() (string, error) {
+	return "", nil // no-op implementation for secure storage manager
 }
 
 func newNoopSecureStorageManager() *noopSecureStorageManager {
 	return &noopSecureStorageManager{}
 }
 
-func (ssm *noopSecureStorageManager) setCredential(_ *secureTokenSpec, _ string) {
+func (ssm *noopSecureStorageManager) setCredential(_ *string, _ *secureTokenSpec, _ string) {
 }
 
-func (ssm *noopSecureStorageManager) getCredential(_ *secureTokenSpec) string {
-	return ""
+func (ssm *noopSecureStorageManager) getCredential(_ *string, _ *secureTokenSpec) (string, error) {
+	return "", nil // no-op implementation for secure storage manager
 }
 
-func (ssm *noopSecureStorageManager) deleteCredential(_ *secureTokenSpec) {
+func (ssm *noopSecureStorageManager) deleteCredential(_ *string, _ *secureTokenSpec) {
 }
 
-type threadSafeSecureStorageManager struct {
-	mu       *sync.Mutex
-	delegate secureStorageManager
-}
-
-func (ssm *threadSafeSecureStorageManager) setCredential(tokenSpec *secureTokenSpec, value string) {
-	ssm.mu.Lock()
-	defer ssm.mu.Unlock()
-	ssm.delegate.setCredential(tokenSpec, value)
-}
-
-func (ssm *threadSafeSecureStorageManager) getCredential(tokenSpec *secureTokenSpec) string {
-	ssm.mu.Lock()
-	defer ssm.mu.Unlock()
-	return ssm.delegate.getCredential(tokenSpec)
-}
-
-func (ssm *threadSafeSecureStorageManager) deleteCredential(tokenSpec *secureTokenSpec) {
-	ssm.mu.Lock()
-	defer ssm.mu.Unlock()
-	ssm.delegate.deleteCredential(tokenSpec)
+func (ssm *noopSecureStorageManager) releaseLease(_ *string) {
 }
