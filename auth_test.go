@@ -455,10 +455,10 @@ func TestUnitAuthenticateWithTokenAccessor(t *testing.T) {
 	}
 	sc.rest = sr
 
-	leaseId, _ := credentialsStorage.acquireLease()
-	defer credentialsStorage.releaseLease(&leaseId)
+	lease, _ := credentialsStorage.acquireLease()
+	defer lease.Release()
 	// FuncPostAuth is set to fail, but AuthTypeTokenAccessor should not even make a call to FuncPostAuth
-	resp, err := authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	resp, err := authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err != nil {
 		t.Fatalf("should not have failed, err %v", err)
 	}
@@ -499,9 +499,9 @@ func TestUnitAuthenticate(t *testing.T) {
 	}
 	sc.rest = sr
 
-	leaseId, _ := credentialsStorage.acquireLease()
-	defer credentialsStorage.releaseLease(&leaseId)
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	lease, _ := credentialsStorage.acquireLease()
+	defer lease.Release()
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err == nil {
 		t.Fatal("should have failed.")
 	}
@@ -510,7 +510,7 @@ func TestUnitAuthenticate(t *testing.T) {
 		t.Fatalf("Snowflake error is expected. err: %v", driverErr)
 	}
 	sr.FuncPostAuth = postAuthFailWrongAccount
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err == nil {
 		t.Fatal("should have failed.")
 	}
@@ -519,7 +519,7 @@ func TestUnitAuthenticate(t *testing.T) {
 		t.Fatalf("Snowflake error is expected. err: %v", driverErr)
 	}
 	sr.FuncPostAuth = postAuthFailUnknown
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err == nil {
 		t.Fatal("should have failed.")
 	}
@@ -529,7 +529,7 @@ func TestUnitAuthenticate(t *testing.T) {
 	}
 	ta.SetTokens("bad-token", "bad-master-token", 1)
 	sr.FuncPostAuth = postAuthSuccessWithErrorCode
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err == nil {
 		t.Fatal("should have failed.")
 	}
@@ -543,7 +543,7 @@ func TestUnitAuthenticate(t *testing.T) {
 	}
 	ta.SetTokens("bad-token", "bad-master-token", 1)
 	sr.FuncPostAuth = postAuthSuccessWithInvalidErrorCode
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err == nil {
 		t.Fatal("should have failed.")
 	}
@@ -553,7 +553,7 @@ func TestUnitAuthenticate(t *testing.T) {
 	}
 	sr.FuncPostAuth = postAuthSuccess
 	var resp *authResponseMain
-	resp, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	resp, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err != nil {
 		t.Fatalf("failed to auth. err: %v", err)
 	}
@@ -574,8 +574,8 @@ func TestUnitAuthenticate(t *testing.T) {
 
 func TestUnitAuthenticateSaml(t *testing.T) {
 	var err error
-	leaseId, _ := credentialsStorage.acquireLease()
-	defer credentialsStorage.releaseLease(&leaseId)
+	lease, _ := credentialsStorage.acquireLease()
+	defer lease.Release()
 	sr := &snowflakeRestful{
 		Protocol:         "https",
 		Host:             "abc.com",
@@ -593,15 +593,15 @@ func TestUnitAuthenticateSaml(t *testing.T) {
 		Host:   "abc.com",
 	}
 	sc.rest = sr
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	assertNilF(t, err, "failed to run.")
 }
 
 // Unit test for OAuth.
 func TestUnitAuthenticateOAuth(t *testing.T) {
 	var err error
-	leaseId, _ := credentialsStorage.acquireLease()
-	defer credentialsStorage.releaseLease(&leaseId)
+	lease, _ := credentialsStorage.acquireLease()
+	defer lease.Release()
 	sr := &snowflakeRestful{
 		FuncPostAuth:  postAuthCheckOAuth,
 		TokenAccessor: getSimpleTokenAccessor(),
@@ -610,7 +610,7 @@ func TestUnitAuthenticateOAuth(t *testing.T) {
 	sc.cfg.Token = "oauthToken"
 	sc.cfg.Authenticator = AuthTypeOAuth
 	sc.rest = sr
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err != nil {
 		t.Fatalf("failed to run. err: %v", err)
 	}
@@ -618,8 +618,8 @@ func TestUnitAuthenticateOAuth(t *testing.T) {
 
 func TestUnitAuthenticatePasscode(t *testing.T) {
 	var err error
-	leaseId, _ := credentialsStorage.acquireLease()
-	defer credentialsStorage.releaseLease(&leaseId)
+	lease, _ := credentialsStorage.acquireLease()
+	defer lease.Release()
 	sr := &snowflakeRestful{
 		FuncPostAuth:  postAuthCheckPasscode,
 		TokenAccessor: getSimpleTokenAccessor(),
@@ -628,14 +628,14 @@ func TestUnitAuthenticatePasscode(t *testing.T) {
 	sc.cfg.Passcode = "987654321"
 	sc.rest = sr
 
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err != nil {
 		t.Fatalf("failed to run. err: %v", err)
 	}
 	sr.FuncPostAuth = postAuthCheckPasscodeInPassword
 	sc.rest = sr
 	sc.cfg.PasscodeInPassword = true
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err != nil {
 		t.Fatalf("failed to run. err: %v", err)
 	}
@@ -645,8 +645,8 @@ func TestUnitAuthenticatePasscode(t *testing.T) {
 func TestUnitAuthenticateJWT(t *testing.T) {
 	var err error
 
-	leaseId, _ := credentialsStorage.acquireLease()
-	defer credentialsStorage.releaseLease(&leaseId)
+	lease, _ := credentialsStorage.acquireLease()
+	defer lease.Release()
 	sr := &snowflakeRestful{
 		FuncPostAuth:  postAuthCheckJWTToken,
 		TokenAccessor: getSimpleTokenAccessor(),
@@ -658,7 +658,7 @@ func TestUnitAuthenticateJWT(t *testing.T) {
 	sc.rest = sr
 
 	// A valid JWT token should pass
-	if _, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{}); err != nil {
+	if _, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{}); err != nil {
 		t.Fatalf("failed to run. err: %v", err)
 	}
 
@@ -668,15 +668,15 @@ func TestUnitAuthenticateJWT(t *testing.T) {
 		t.Error(err)
 	}
 	sc.cfg.PrivateKey = invalidPrivateKey
-	if _, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{}); err == nil {
+	if _, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{}); err == nil {
 		t.Fatalf("invalid token passed")
 	}
 }
 
 func TestUnitAuthenticateUsernamePasswordMfa(t *testing.T) {
 	var err error
-	leaseId, _ := credentialsStorage.acquireLease()
-	defer credentialsStorage.releaseLease(&leaseId)
+	lease, _ := credentialsStorage.acquireLease()
+	defer lease.Release()
 	sr := &snowflakeRestful{
 		FuncPostAuth:  postAuthCheckUsernamePasswordMfa,
 		TokenAccessor: getSimpleTokenAccessor(),
@@ -685,20 +685,20 @@ func TestUnitAuthenticateUsernamePasswordMfa(t *testing.T) {
 	sc.cfg.Authenticator = AuthTypeUsernamePasswordMFA
 	sc.cfg.ClientRequestMfaToken = ConfigBoolTrue
 	sc.rest = sr
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err != nil {
 		t.Fatalf("failed to run. err: %v", err)
 	}
 
 	sr.FuncPostAuth = postAuthCheckUsernamePasswordMfaToken
 	sc.cfg.MfaToken = "mockedMfaToken"
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err != nil {
 		t.Fatalf("failed to run. err: %v", err)
 	}
 
 	sr.FuncPostAuth = postAuthCheckUsernamePasswordMfaFailed
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err == nil {
 		t.Fatal("should have failed")
 	}
@@ -769,8 +769,8 @@ func TestUnitAuthenticateWithConfigExternalBrowser(t *testing.T) {
 
 func TestUnitAuthenticateExternalBrowser(t *testing.T) {
 	var err error
-	leaseId, _ := credentialsStorage.acquireLease()
-	defer credentialsStorage.releaseLease(&leaseId)
+	lease, _ := credentialsStorage.acquireLease()
+	defer lease.Release()
 	sr := &snowflakeRestful{
 		FuncPostAuth:  postAuthCheckExternalBrowser,
 		TokenAccessor: getSimpleTokenAccessor(),
@@ -779,20 +779,20 @@ func TestUnitAuthenticateExternalBrowser(t *testing.T) {
 	sc.cfg.Authenticator = AuthTypeExternalBrowser
 	sc.cfg.ClientStoreTemporaryCredential = ConfigBoolTrue
 	sc.rest = sr
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err != nil {
 		t.Fatalf("failed to run. err: %v", err)
 	}
 
 	sr.FuncPostAuth = postAuthCheckExternalBrowserToken
 	sc.cfg.IDToken = "mockedIDToken"
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err != nil {
 		t.Fatalf("failed to run. err: %v", err)
 	}
 
 	sr.FuncPostAuth = postAuthCheckExternalBrowserFailed
-	_, err = authenticate(context.Background(), &leaseId, sc, []byte{}, []byte{})
+	_, err = authenticate(context.Background(), lease, sc, []byte{}, []byte{})
 	if err == nil {
 		t.Fatal("should have failed")
 	}
@@ -985,9 +985,9 @@ func TestOktaRetryWithNewToken(t *testing.T) {
 	sc.rest = sr
 	sc.ctx = context.Background()
 
-	leaseId, _ := credentialsStorage.acquireLease()
-	defer credentialsStorage.releaseLease(&leaseId)
-	authResponse, err := authenticate(context.Background(), &leaseId, sc, []byte{0x12, 0x34}, []byte{0x56, 0x78})
+	lease, _ := credentialsStorage.acquireLease()
+	defer lease.Release()
+	authResponse, err := authenticate(context.Background(), lease, sc, []byte{0x12, 0x34}, []byte{0x56, 0x78})
 	assertNilF(t, err, "should not have failed to run authenticate()")
 	assertEqualF(t, authResponse.MasterToken, expectedMasterToken)
 	assertEqualF(t, authResponse.Token, expectedToken)
@@ -1074,10 +1074,11 @@ func TestWithOauthAuthorizationCodeFlowManual(t *testing.T) {
 			assertNilF(t, err)
 			cfg.Authenticator = AuthTypeOAuthAuthorizationCode
 			tokenRequestURL := cmp.Or(cfg.OauthTokenRequestURL, fmt.Sprintf("https://%v.snowflakecomputing.com:443/oauth/token-request", cfg.Account))
-			leaseId, _ := credentialsStorage.acquireLease()
-			defer credentialsStorage.releaseLease(&leaseId)
-			credentialsStorage.deleteCredential(&leaseId, newOAuthAccessTokenSpec(tokenRequestURL, cfg.User))
-			credentialsStorage.deleteCredential(&leaseId, newOAuthRefreshTokenSpec(tokenRequestURL, cfg.User))
+			lease, _ := credentialsStorage.acquireLease()
+			credentialsStorage.deleteCredential(lease, newOAuthAccessTokenSpec(tokenRequestURL, cfg.User))
+			credentialsStorage.deleteCredential(lease, newOAuthRefreshTokenSpec(tokenRequestURL, cfg.User))
+			lease.Release()
+
 			connector := NewConnector(&SnowflakeDriver{}, *cfg)
 			db := sql.OpenDB(connector)
 			defer db.Close()
@@ -1089,7 +1090,11 @@ func TestWithOauthAuthorizationCodeFlowManual(t *testing.T) {
 			assertNilF(t, err)
 			defer conn2.Close()
 			runSmokeQueryWithConn(t, conn2)
-			credentialsStorage.setCredential(&leaseId, newOAuthAccessTokenSpec(cfg.OauthTokenRequestURL, cfg.User), "expired-token")
+
+			lease, _ = credentialsStorage.acquireLease()
+			defer lease.Release()
+			credentialsStorage.setCredential(lease, newOAuthAccessTokenSpec(cfg.OauthTokenRequestURL, cfg.User), "expired-token")
+
 			conn3, err := db.Conn(context.Background())
 			assertNilF(t, err)
 			defer conn3.Close()

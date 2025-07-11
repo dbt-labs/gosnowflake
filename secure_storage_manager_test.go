@@ -64,18 +64,19 @@ func TestSnowflakeFileBasedSecureStorageManager(t *testing.T) {
 	credCacheDirEnvOverride := overrideEnv(credCacheDirEnv, credCacheDir)
 	defer credCacheDirEnvOverride.rollback()
 	ssm, err := newFileBasedSecureStorageManager()
-	leaseId, _ := ssm.acquireLease()
-	defer ssm.releaseLease(&leaseId)
 	assertNilF(t, err)
 
 	t.Run("store single token", func(t *testing.T) {
 		tokenSpec := newMfaTokenSpec("host.com", "johndoe")
 		cred := "token123"
-		ssm.setCredential(&leaseId, tokenSpec, cred)
-		accessTok, _ := ssm.getCredential(&leaseId, tokenSpec)
+
+		lease, _ := ssm.acquireLease()
+		defer lease.Release()
+		ssm.setCredential(lease, tokenSpec, cred)
+		accessTok, _ := ssm.getCredential(lease, tokenSpec)
 		assertEqualE(t, accessTok, cred)
-		ssm.deleteCredential(&leaseId, tokenSpec)
-		accessTok, _ = ssm.getCredential(&leaseId, tokenSpec)
+		ssm.deleteCredential(lease, tokenSpec)
+		accessTok, _ = ssm.getCredential(lease, tokenSpec)
 		assertEqualE(t, accessTok, "")
 	})
 
@@ -88,19 +89,22 @@ func TestSnowflakeFileBasedSecureStorageManager(t *testing.T) {
 		idCred2 := "token56"
 		idTokenSpec3 := newIDTokenSpec("host.com", "someoneelse")
 		idCred3 := "token78"
-		ssm.setCredential(&leaseId, mfaTokenSpec, mfaCred)
-		ssm.setCredential(&leaseId, idTokenSpec, idCred)
-		ssm.setCredential(&leaseId, idTokenSpec2, idCred2)
-		ssm.setCredential(&leaseId, idTokenSpec3, idCred3)
+
+		lease, _ := ssm.acquireLease()
+		defer lease.Release()
+		ssm.setCredential(lease, mfaTokenSpec, mfaCred)
+		ssm.setCredential(lease, idTokenSpec, idCred)
+		ssm.setCredential(lease, idTokenSpec2, idCred2)
+		ssm.setCredential(lease, idTokenSpec3, idCred3)
 		getCredential := func(spec *secureTokenSpec) string {
-			cred, _ := ssm.getCredential(&leaseId, spec)
+			cred, _ := ssm.getCredential(lease, spec)
 			return cred
 		}
 		assertEqualE(t, getCredential(mfaTokenSpec), mfaCred)
 		assertEqualE(t, getCredential(idTokenSpec), idCred)
 		assertEqualE(t, getCredential(idTokenSpec2), idCred2)
 		assertEqualE(t, getCredential(idTokenSpec3), idCred3)
-		ssm.deleteCredential(&leaseId, mfaTokenSpec)
+		ssm.deleteCredential(lease, mfaTokenSpec)
 		assertEqualE(t, getCredential(mfaTokenSpec), "")
 		assertEqualE(t, getCredential(idTokenSpec), idCred)
 		assertEqualE(t, getCredential(idTokenSpec2), idCred2)
@@ -112,28 +116,32 @@ func TestSnowflakeFileBasedSecureStorageManager(t *testing.T) {
 		mfaCred := "token123"
 		idTokenSpec := newIDTokenSpec("host.com", "johndoe")
 		idCred := "token456"
-		ssm.setCredential(&leaseId, mfaTokenSpec, mfaCred)
-		ssm.setCredential(&leaseId, idTokenSpec, idCred)
-		cred, _ := ssm.getCredential(&leaseId, mfaTokenSpec)
+
+		lease, _ := ssm.acquireLease()
+		defer lease.Release()
+		ssm.setCredential(lease, mfaTokenSpec, mfaCred)
+		ssm.setCredential(lease, idTokenSpec, idCred)
+		cred, _ := ssm.getCredential(lease, mfaTokenSpec)
 		assertEqualE(t, cred, mfaCred)
 		mfaCredOverride := "token789"
-		ssm.setCredential(&leaseId, mfaTokenSpec, mfaCredOverride)
-		cred, _ = ssm.getCredential(&leaseId, mfaTokenSpec)
+		ssm.setCredential(lease, mfaTokenSpec, mfaCredOverride)
+		cred, _ = ssm.getCredential(lease, mfaTokenSpec)
 		assertEqualE(t, cred, mfaCredOverride)
-		ssm.setCredential(&leaseId, idTokenSpec, idCred)
+		ssm.setCredential(lease, idTokenSpec, idCred)
 	})
 
 	t.Run("unlock stale cache", func(t *testing.T) {
-		leaseId0, _ := ssm.acquireLease()
-		defer ssm.releaseLease(&leaseId0)
-		assertNotNilF(t, leaseId)
 		tokenSpec := newMfaTokenSpec("stale", "cache")
-		ssm.releaseLease(&leaseId)
 
-		leaseId1, _ := ssm.acquireLease()
-		defer ssm.releaseLease(&leaseId1)
-		ssm.setCredential(&leaseId, tokenSpec, "unlocked")
-		cred, _ := ssm.getCredential(&leaseId1, tokenSpec)
+		lease0, _ := ssm.acquireLease()
+		defer lease0.Release()
+		assertNotNilF(t, lease0)
+		lease0.Release()
+
+		lease1, _ := ssm.acquireLease()
+		defer lease1.Release()
+		ssm.setCredential(lease1, tokenSpec, "unlocked")
+		cred, _ := ssm.getCredential(lease1, tokenSpec)
 		assertEqualE(t, cred, "unlocked")
 	})
 
@@ -216,17 +224,17 @@ func TestSetAndGetCredential(t *testing.T) {
 	} {
 		t.Run(string(tokenSpec.tokenType), func(t *testing.T) {
 			skipOnMac(t, "keyring asks for password")
-			leaseId, _ := credentialsStorage.acquireLease()
-			defer credentialsStorage.releaseLease(&leaseId)
+			lease, _ := credentialsStorage.acquireLease()
+			defer lease.Release()
 			fakeMfaToken := "test token"
 			tokenSpec := newMfaTokenSpec("testHost", "testUser")
-			credentialsStorage.setCredential(&leaseId, tokenSpec, fakeMfaToken)
-			cred, _ := credentialsStorage.getCredential(&leaseId, tokenSpec)
+			credentialsStorage.setCredential(lease, tokenSpec, fakeMfaToken)
+			cred, _ := credentialsStorage.getCredential(lease, tokenSpec)
 			assertEqualE(t, cred, fakeMfaToken)
 
 			// delete credential and check it no longer exists
-			credentialsStorage.deleteCredential(&leaseId, tokenSpec)
-			cred, _ = credentialsStorage.getCredential(&leaseId, tokenSpec)
+			credentialsStorage.deleteCredential(lease, tokenSpec)
+			cred, _ = credentialsStorage.getCredential(lease, tokenSpec)
 			assertEqualE(t, cred, "")
 		})
 	}
@@ -240,10 +248,10 @@ func TestSkipStoringCredentialIfUserIsEmpty(t *testing.T) {
 
 	for _, tokenSpec := range tokenSpecs {
 		t.Run(tokenSpec.host, func(t *testing.T) {
-			leaseId, _ := credentialsStorage.acquireLease()
-			defer credentialsStorage.releaseLease(&leaseId)
-			credentialsStorage.setCredential(&leaseId, tokenSpec, "non-empty-value")
-			cred, _ := credentialsStorage.getCredential(&leaseId, tokenSpec)
+			lease, _ := credentialsStorage.acquireLease()
+			defer lease.Release()
+			credentialsStorage.setCredential(lease, tokenSpec, "non-empty-value")
+			cred, _ := credentialsStorage.getCredential(lease, tokenSpec)
 			assertEqualE(t, cred, "")
 		})
 	}
@@ -257,10 +265,10 @@ func TestSkipStoringCredentialIfHostIsEmpty(t *testing.T) {
 
 	for _, tokenSpec := range tokenSpecs {
 		t.Run(tokenSpec.user, func(t *testing.T) {
-			leaseId, _ := credentialsStorage.acquireLease()
-			defer credentialsStorage.releaseLease(&leaseId)
-			credentialsStorage.setCredential(&leaseId, tokenSpec, "non-empty-value")
-			cred, _ := credentialsStorage.getCredential(&leaseId, tokenSpec)
+			lease, _ := credentialsStorage.acquireLease()
+			defer lease.Release()
+			credentialsStorage.setCredential(lease, tokenSpec, "non-empty-value")
+			cred, _ := credentialsStorage.getCredential(lease, tokenSpec)
 			assertEqualE(t, cred, "")
 		})
 	}
@@ -286,13 +294,13 @@ func TestStoreTemporaryCredential(t *testing.T) {
 
 	for _, test := range testcases {
 		t.Run(test.value, func(t *testing.T) {
-			leaseId, _ := ssm.acquireLease()
-			defer ssm.releaseLease(&leaseId)
-			ssm.setCredential(&leaseId, test.tokenSpec, test.value)
-			cred, _ := ssm.getCredential(&leaseId, test.tokenSpec)
+			lease, _ := ssm.acquireLease()
+			defer lease.Release()
+			ssm.setCredential(lease, test.tokenSpec, test.value)
+			cred, _ := ssm.getCredential(lease, test.tokenSpec)
 			assertEqualE(t, cred, test.value)
-			ssm.deleteCredential(&leaseId, test.tokenSpec)
-			cred, _ = ssm.getCredential(&leaseId, test.tokenSpec)
+			ssm.deleteCredential(lease, test.tokenSpec)
+			cred, _ = ssm.getCredential(lease, test.tokenSpec)
 			assertEqualE(t, cred, "")
 		})
 	}

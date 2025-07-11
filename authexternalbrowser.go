@@ -221,6 +221,7 @@ type authenticateByExternalBrowserResult struct {
 
 func authenticateByExternalBrowser(
 	ctx context.Context,
+	lease *Lease,
 	sr *snowflakeRestful,
 	authenticator string,
 	application string,
@@ -234,7 +235,7 @@ func authenticateByExternalBrowser(
 	go GoroutineWrapper(
 		ctx,
 		func() {
-			resultChan <- doAuthenticateByExternalBrowser(ctx, sr, authenticator, application, account, user, password, disableConsoleLogin)
+			resultChan <- doAuthenticateByExternalBrowser(ctx, lease, sr, authenticator, application, account, user, password, disableConsoleLogin)
 		},
 	)
 	select {
@@ -256,6 +257,7 @@ func authenticateByExternalBrowser(
 //   - authenticate is complete!
 func doAuthenticateByExternalBrowser(
 	ctx context.Context,
+	lease *Lease,
 	sr *snowflakeRestful,
 	authenticator string,
 	application string,
@@ -289,7 +291,7 @@ func doAuthenticateByExternalBrowser(
 	if err := openBrowser(loginURL); err == nil {
 		// ---- AUTOMATIC PATH
 		// Block until the browser redirect hits the listener.
-		token, readErr := waitForSamlResponse(ctx, l, application)
+		token, readErr := waitForSamlResponse(ctx, lease, l, application)
 		if readErr != nil {
 			return authenticateByExternalBrowserResult{nil, nil, readErr}
 		}
@@ -335,9 +337,10 @@ func doAuthenticateByExternalBrowser(
 	}
 }
 
-func waitForSamlResponse(ctx context.Context, l net.Listener, application string) (string, error) {
+func waitForSamlResponse(ctx context.Context, lease *Lease, l net.Listener, application string) (string, error) {
 	encodedChan := make(chan string, 1)
 	errChan := make(chan error, 1)
+	ticker := time.NewTicker(leaseTTL / 2)
 
 	go func() {
 		conn, err := l.Accept()
@@ -393,11 +396,17 @@ func waitForSamlResponse(ctx context.Context, l net.Listener, application string
 		encodedChan <- encoded
 	}()
 
-	select {
-	case s := <-encodedChan:
-		return s, nil
-	case e := <-errChan:
-		return "", e
+	for {
+		select {
+		case <-ticker.C:
+			lease.Renew(leaseTTL)
+		case s := <-encodedChan:
+			ticker.Stop()
+			return s, nil
+		case e := <-errChan:
+			ticker.Stop()
+			return "", e
+		}
 	}
 }
 
