@@ -219,13 +219,23 @@ type authenticateByExternalBrowserResult struct {
 	err                 error
 }
 
-func authenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, authenticator string, application string,
-	account string, user string, externalBrowserTimeout time.Duration, disableConsoleLogin ConfigBool) ([]byte, []byte, error) {
+func authenticateByExternalBrowser(
+	ctx context.Context,
+	lease *Lease,
+	sr *snowflakeRestful,
+	authenticator string,
+	application string,
+	account string,
+	user string,
+	password string,
+	externalBrowserTimeout time.Duration,
+	disableConsoleLogin ConfigBool,
+) ([]byte, []byte, error) {
 	resultChan := make(chan authenticateByExternalBrowserResult, 1)
 	go GoroutineWrapper(
 		ctx,
 		func() {
-			resultChan <- doAuthenticateByExternalBrowser(ctx, sr, authenticator, application, account, user, disableConsoleLogin)
+			resultChan <- doAuthenticateByExternalBrowser(ctx, lease, sr, authenticator, application, account, user, password, disableConsoleLogin)
 		},
 	)
 	select {
@@ -247,6 +257,7 @@ func authenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, au
 //   - authenticate is complete!
 func doAuthenticateByExternalBrowser(
 	ctx context.Context,
+	lease *Lease,
 	sr *snowflakeRestful,
 	authenticator string,
 	application string,
@@ -282,40 +293,41 @@ func doAuthenticateByExternalBrowser(
 	// Invoke SAML response provider (either auto-launch or manual token flow)
 	manualToken, err := defaultSamlResponseProvider().run(loginURL)
 	if err != nil {
-	    return authenticateByExternalBrowserResult{nil, nil, err}
+		return authenticateByExternalBrowserResult{nil, nil, err}
 	}
 
 	// TODO(versusfacit): Upstream now uses caller indirection. Preserve branching here
 	// until we unify upstream flow handling.
 	if manualToken != "" {
-	    // We're in manual/pasted path, skip listener
-	    // Listener not needed; close it so Snowflake cannot connect.
-	    _ = l.Close()
+		// We're in manual/pasted path, skip listener
+		// Listener not needed; close it so Snowflake cannot connect.
+		_ = l.Close()
 
-	    unescaped, err := url.QueryUnescape(manualToken)
-	    if err != nil {
-		return authenticateByExternalBrowserResult{nil, nil, err}
-	    }
-	    return authenticateByExternalBrowserResult{[]byte(unescaped), []byte(proofKey), nil}
+		unescaped, err := url.QueryUnescape(manualToken)
+		if err != nil {
+			return authenticateByExternalBrowserResult{nil, nil, err}
+		}
+		return authenticateByExternalBrowserResult{[]byte(unescaped), []byte(proofKey), nil}
 	}
 
 	// Otherwise, automatic path: wait for listener callback
-	token, readErr := waitForSamlResponse(ctx, l, application)
+	token, readErr := waitForSamlResponse(ctx, lease, l, application)
 	if readErr != nil {
-	    return authenticateByExternalBrowserResult{nil, nil, readErr}
+		return authenticateByExternalBrowserResult{nil, nil, readErr}
 	}
 
 	unescaped, err := url.QueryUnescape(token)
 	if err != nil {
-	    return authenticateByExternalBrowserResult{nil, nil, err}
+		return authenticateByExternalBrowserResult{nil, nil, err}
 	}
 
 	return authenticateByExternalBrowserResult{[]byte(unescaped), []byte(proofKey), nil}
 }
 
-func waitForSamlResponse(ctx context.Context, l net.Listener, application string) (string, error) {
+func waitForSamlResponse(ctx context.Context, lease *Lease, l net.Listener, application string) (string, error) {
 	encodedChan := make(chan string, 1)
 	errChan := make(chan error, 1)
+	ticker := time.NewTicker(leaseTTL / 2)
 
 	go func() {
 		conn, err := l.Accept()
@@ -371,11 +383,17 @@ func waitForSamlResponse(ctx context.Context, l net.Listener, application string
 		encodedChan <- encoded
 	}()
 
-	select {
-	case s := <-encodedChan:
-		return s, nil
-	case e := <-errChan:
-		return "", e
+	for {
+		select {
+		case <-ticker.C:
+			lease.Renew(leaseTTL)
+		case s := <-encodedChan:
+			ticker.Stop()
+			return s, nil
+		case e := <-errChan:
+			ticker.Stop()
+			return "", e
+		}
 	}
 }
 
@@ -392,12 +410,18 @@ func manualTokenFallback() (string, error) {
 	t := term.NewTerminal(os.Stdin, "Paste redirect URL: ")
 
 	for {
-	        // ReadLine echoes & handles Ctrl-C/Z
+		// ReadLine echoes & handles Ctrl-C/Z
 		line, err := t.ReadLine()
-		if err == io.EOF { return "", errors.New("user aborted") }
-		if err != nil   { return "", err }
+		if err == io.EOF {
+			return "", errors.New("user aborted")
+		}
+		if err != nil {
+			return "", err
+		}
 
-		if line == ""   { return "", errors.New("no URL provided") }
+		if line == "" {
+			return "", errors.New("no URL provided")
+		}
 
 		if token, ok := extractToken(line); ok {
 			return token, nil
@@ -416,45 +440,45 @@ func extractToken(s string) (string, bool) {
 }
 
 type samlResponseProvider interface {
-    // Attempts to open the browser to the given login URL.
-    // Returns empty string if automatic flow is possible (listener will capture).
-    // Returns token string if manual fallback flow is needed.
-    run(loginURL string) (string, error)
+	// Attempts to open the browser to the given login URL.
+	// Returns empty string if automatic flow is possible (listener will capture).
+	// Returns token string if manual fallback flow is needed.
+	run(loginURL string) (string, error)
 }
 
 type externalBrowserSamlResponseProvider struct {
 }
 
 func (e externalBrowserSamlResponseProvider) run(loginURL string) (string, error) {
-    fmt.Printf(`
+	fmt.Printf(`
     Initiating login request in browser with your identity provider.
     `)
 
-    if err := openBrowser(loginURL); err == nil {
-        // ---- AUTOMATIC PATH
-        // Browser successfully opened. Listener will capture the redirect.
-        return "", nil
-    }
+	if err := openBrowser(loginURL); err == nil {
+		// ---- AUTOMATIC PATH
+		// Browser successfully opened. Listener will capture the redirect.
+		return "", nil
+	}
 
-    // ----- MANUAL FALLBACK -----
-    logger.Warnf("external-browser auth: could not open browser automatically.")
-    logger.Warnf("manual authentication URL: %s", loginURL)
+	// ----- MANUAL FALLBACK -----
+	logger.Warnf("external-browser auth: could not open browser automatically.")
+	logger.Warnf("manual authentication URL: %s", loginURL)
 
-    fmt.Printf(`
+	fmt.Printf(`
 %s
 
 We were unable to open a browser window for you.
 Please open the URL above manually, complete the sign-in, then paste
 the URL you were finally redirected to here.
 `, loginURL)
-    fmt.Printf("\n")
+	fmt.Printf("\n")
 
-    token, perr := manualTokenFallback()
-    if perr != nil {
-        return "", perr
-    }
+	token, perr := manualTokenFallback()
+	if perr != nil {
+		return "", perr
+	}
 
-    return token, nil
+	return token, nil
 }
 
 var defaultSamlResponseProvider = func() samlResponseProvider {
