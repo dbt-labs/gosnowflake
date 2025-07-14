@@ -3,12 +3,9 @@
 package gosnowflake
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/user"
-	"strconv"
 	"syscall"
 )
 
@@ -65,25 +62,6 @@ func validateFilePermissionBits(f *os.File, expectedPerm os.FileMode) error {
 	filePerm := fileInfo.Mode()
 	if filePerm&expectedPerm != 0 {
 		return fmt.Errorf("incorrect permissions of %s", f.Name())
-	}
-	return nil
-}
-
-func ensureFileOwner(f *os.File) error {
-	ownerUID, err := provideFileOwner(f)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	currentUser, err := user.Current()
-	if err != nil {
-		return err
-	}
-	// If we couldn’t stat the owner (e.g. rootless container), be lenient.
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if strconv.Itoa(int(ownerUID)) != currentUser.Uid {
-		return errors.New("incorrect owner of " + f.Name())
 	}
 	return nil
 }
