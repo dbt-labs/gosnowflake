@@ -7,8 +7,10 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,7 +19,9 @@ import (
 )
 
 const (
-	leaseTTL          = 10 * time.Second
+	leaseTTL              = 10 * time.Second
+	leaseOperationTimeout = 60 * time.Second
+
 	credCacheDirEnv   = "SF_TEMPORARY_CREDENTIAL_CACHE_DIR"
 	credLeaseFileName = "credential_cache.lease"
 	credCacheFileName = "credential_cache_v1.json"
@@ -84,7 +88,7 @@ func newFileBasedSecureStorageManager() (*fileBasedSecureStorageManager, error) 
 	if err != nil {
 		return nil, err
 	}
-	lease, err := NewLeaseHandler(filepath.Join(credDirPath, credLeaseFileName), DefaultLeaseOperationTimeout)
+	lease, err := NewLeaseHandler(filepath.Join(credDirPath, credLeaseFileName), leaseOperationTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -267,6 +271,24 @@ func (ssm *fileBasedSecureStorageManager) getCredential(lease *Lease, tokenSpec 
 
 func (ssm *fileBasedSecureStorageManager) credFilePath() string {
 	return filepath.Join(ssm.credDirPath, credCacheFileName)
+}
+
+func ensureFileOwner(f *os.File) error {
+	ownerUID, err := provideFileOwner(f)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	currentUser, err := user.Current()
+	if err != nil {
+		return err
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if strconv.Itoa(int(ownerUID)) != currentUser.Uid {
+		return errors.New("incorrect owner of " + f.Name())
+	}
+	return nil
 }
 
 func ensureFilePermissions(f *os.File, expectedMode os.FileMode) error {
