@@ -5,7 +5,7 @@ import (
 	entropy "crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"github.com/timandy/routine"
+	// "github.com/timandy/routine"
 	"io"
 	"math"
 	"math/rand"
@@ -103,7 +103,7 @@ func wait(base, m, cap time.Duration) time.Duration {
 		if d > cap {
 			d = cap
 		}
-		fmt.Fprintf(os.Stdout, "[%v] time.Sleep(%v)\n", routine.Goid(), d)
+		// fmt.Fprintf(os.Stdout, "[%v] time.Sleep(%v)\n", routine.Goid(), d)
 		time.Sleep(d)
 		return d
 	}
@@ -139,8 +139,8 @@ func (l *LeaseHandler) write(leaseId *string, expiry time.Time) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "[%v] WRITTEN: id='%s' ttl=%v elapsed=%s file=%s\n",
-		routine.Goid(), *leaseId, expiry.Sub(time.Now()), time.Since(ctime), l.path)
+	// fmt.Fprintf(os.Stdout, "[%v] WRITTEN: id='%s' ttl=%v elapsed=%s file=%s\n",
+	// 	routine.Goid(), *leaseId, expiry.Sub(time.Now()), time.Since(ctime), l.path)
 	data, err := l.read(gracePeriod-time.Since(ctime), 0, gracePeriod)
 	if err != nil {
 		return err
@@ -148,8 +148,8 @@ func (l *LeaseHandler) write(leaseId *string, expiry time.Time) error {
 	if data.leaseId != *leaseId {
 		return fmt.Errorf("racy lease write: expected '%s', got '%s'", *leaseId, data.leaseId)
 	}
-	fmt.Fprintf(os.Stdout, "[%v] WRITTEN+read: id='%s' ttl='%v' file=%s\n",
-		routine.Goid(), *leaseId, data.ttl(), l.path)
+	// fmt.Fprintf(os.Stdout, "[%v] WRITTEN+read: id='%s' ttl='%v' file=%s\n",
+	// 	routine.Goid(), *leaseId, data.ttl(), l.path)
 	return nil
 }
 
@@ -204,7 +204,7 @@ func (l *LeaseHandler) read(base, m, cap time.Duration) (*leaseData, error) {
 	f, err := os.OpenFile(l.path, os.O_RDONLY, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Fprintf(os.Stdout, "[%v] read empty: file=%s\n", routine.Goid(), l.path)
+			// fmt.Fprintf(os.Stdout, "[%v] read empty: file=%s\n", routine.Goid(), l.path)
 			return noData, nil // no lease file
 		}
 		return noData, err // error opening the file
@@ -217,8 +217,8 @@ func (l *LeaseHandler) read(base, m, cap time.Duration) (*leaseData, error) {
 		return noData, nil // as if it never existed
 	}
 	_ = f.Close()
-	fmt.Fprintf(os.Stdout, "[%v] read: id='%s' ttl=%v\n",
-		routine.Goid(), data.leaseId, data.ttl())
+	// fmt.Fprintf(os.Stdout, "[%v] read: id='%s' ttl=%v\n",
+	// 	routine.Goid(), data.leaseId, data.ttl())
 	return data, nil
 }
 
@@ -243,7 +243,7 @@ func (l *LeaseHandler) Acquire(ttl time.Duration) (*Lease, error) {
 	if err != nil {
 		return nil, fmt.Errorf("lease: %s: %w", l.path, err)
 	}
-	fmt.Fprintf(os.Stdout, "[%v] Acquire('%s', %v)\n", routine.Goid(), newLeaseId, ttl)
+	// fmt.Fprintf(os.Stdout, "[%v] Acquire('%s', %v)\n", routine.Goid(), newLeaseId, ttl)
 
 	newExpiry := func() time.Time {
 		return time.Now().Add(ttl).Add(gracePeriod)
@@ -265,8 +265,8 @@ func (l *LeaseHandler) Acquire(ttl time.Duration) (*Lease, error) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(os.Stdout, "[%v] ACQUIRED: id='%s' ttl=%v\n\n",
-				routine.Goid(), newLeaseId, expiry.Sub(time.Now()))
+			// fmt.Fprintf(os.Stdout, "[%v] ACQUIRED: id='%s' ttl=%v\n\n",
+			// 	routine.Goid(), newLeaseId, expiry.Sub(time.Now()))
 			return &Lease{id: newLeaseId, expiry: expiry, handler: l}, nil
 		}
 		now := time.Now()
@@ -282,8 +282,8 @@ func (l *LeaseHandler) Acquire(ttl time.Duration) (*Lease, error) {
 		if err != nil {
 			continue
 		}
-		fmt.Fprintf(os.Stdout, "[%v] ACQUIRED: id='%s' ttl='%v'\n\n",
-			routine.Goid(), newLeaseId, expiry.Sub(time.Now()))
+		// fmt.Fprintf(os.Stdout, "[%v] ACQUIRED: id='%s' ttl='%v'\n\n",
+		// 	routine.Goid(), newLeaseId, expiry.Sub(time.Now()))
 		return &Lease{id: newLeaseId, expiry: expiry, handler: l}, nil
 	}
 
@@ -291,7 +291,7 @@ func (l *LeaseHandler) Acquire(ttl time.Duration) (*Lease, error) {
 }
 
 func (l *LeaseHandler) renew(leaseId *string, ttl time.Duration, currentExpiry time.Time) (time.Time, error) {
-	fmt.Fprintf(os.Stdout, "[%v] Renew('%s')\n", routine.Goid(), *leaseId)
+	// fmt.Fprintf(os.Stdout, "[%v] Renew('%s')\n", routine.Goid(), *leaseId)
 
 	base := time.Duration(0)
 	m := time.Duration(0)
@@ -325,7 +325,7 @@ func (l *LeaseHandler) renew(leaseId *string, ttl time.Duration, currentExpiry t
 }
 
 func (handler *LeaseHandler) release(leaseId *string, currentExpiry time.Time) error {
-	fmt.Fprintf(os.Stdout, "[%v] Release('%s')\n", routine.Goid(), *leaseId)
+	// fmt.Fprintf(os.Stdout, "[%v] Release('%s')\n", routine.Goid(), *leaseId)
 	// // debug-only sanity check
 	// if data, _ := handler.read(0, 0, 0); !data.leaseIsHeld(leaseId, time.Now()) {
 	// 	panic(fmt.Sprintf("lease '%s' is not held by this process: %s", *leaseId, handler.path))

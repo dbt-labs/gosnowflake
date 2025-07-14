@@ -2,7 +2,7 @@ package gosnowflake
 
 import (
 	"fmt"
-	"github.com/timandy/routine"
+	// "github.com/timandy/routine"
 	"math/rand"
 	"os"
 	"sync"
@@ -70,7 +70,7 @@ func SimulateNProcesses(
 
 			for duration := d; duration > 0; {
 				step := min(ttl/2, duration)
-				fmt.Fprintf(os.Stdout, "[%v] ---- work(%v)\n", routine.Goid(), step)
+				// fmt.Fprintf(os.Stdout, "[%v] ---- work(%v)\n", routine.Goid(), step)
 				time.Sleep(step)
 				duration -= step
 
