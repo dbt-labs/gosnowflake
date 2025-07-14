@@ -97,17 +97,18 @@ func TestUnitAuthenticateByExternalBrowser(t *testing.T) {
 		FuncPostAuthSAML: postAuthExternalBrowserError,
 		TokenAccessor:    getSimpleTokenAccessor(),
 	}
-	_, _, err := authenticateByExternalBrowser(context.Background(), sr, authenticator, application, account, user, password, timeout, ConfigBoolTrue)
+	lease, _ := credentialsStorage.acquireLease()
+	_, _, err := authenticateByExternalBrowser(context.Background(), lease, sr, authenticator, application, account, user, password, timeout, ConfigBoolTrue)
 	if err == nil {
 		t.Fatal("should have failed.")
 	}
 	sr.FuncPostAuthSAML = postAuthExternalBrowserFail
-	_, _, err = authenticateByExternalBrowser(context.Background(), sr, authenticator, application, account, user, password, timeout, ConfigBoolTrue)
+	_, _, err = authenticateByExternalBrowser(context.Background(), lease, sr, authenticator, application, account, user, password, timeout, ConfigBoolTrue)
 	if err == nil {
 		t.Fatal("should have failed.")
 	}
 	sr.FuncPostAuthSAML = postAuthExternalBrowserFailWithCode
-	_, _, err = authenticateByExternalBrowser(context.Background(), sr, authenticator, application, account, user, password, timeout, ConfigBoolTrue)
+	_, _, err = authenticateByExternalBrowser(context.Background(), lease, sr, authenticator, application, account, user, password, timeout, ConfigBoolTrue)
 	if err == nil {
 		t.Fatal("should have failed.")
 	}
@@ -134,12 +135,13 @@ func TestAuthenticationTimeout(t *testing.T) {
 		FuncPostAuthSAML: postAuthExternalBrowserErrorDelayed,
 		TokenAccessor:    getSimpleTokenAccessor(),
 	}
-	_, _, err := authenticateByExternalBrowser(context.Background(), sr, authenticator, application, account, user, password, timeout, ConfigBoolTrue)
+	lease, _ := credentialsStorage.acquireLease()
+	_, _, err := authenticateByExternalBrowser(context.Background(), lease, sr, authenticator, application, account, user, password, timeout, ConfigBoolTrue)
 	assertEqualE(t, err.Error(), "authentication timed out", err.Error())
 }
 
 func Test_createLocalTCPListener(t *testing.T) {
-	listener, err := createLocalTCPListener(0)
+	listener, err := createLocalTCPListener(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("createLocalTCPListener() failed: %v", err)
 	}

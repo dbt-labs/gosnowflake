@@ -221,6 +221,7 @@ type authenticateByExternalBrowserResult struct {
 
 func authenticateByExternalBrowser(
 	ctx context.Context,
+	lease *Lease,
 	sr *snowflakeRestful,
 	authenticator string,
 	application string,
@@ -234,7 +235,7 @@ func authenticateByExternalBrowser(
 	go GoroutineWrapper(
 		ctx,
 		func() {
-			resultChan <- doAuthenticateByExternalBrowser(ctx, sr, authenticator, application, account, user, password, disableConsoleLogin)
+			resultChan <- doAuthenticateByExternalBrowser(ctx, lease, sr, authenticator, application, account, user, password, disableConsoleLogin)
 		},
 	)
 	select {
@@ -256,6 +257,7 @@ func authenticateByExternalBrowser(
 //   - authenticate is complete!
 func doAuthenticateByExternalBrowser(
 	ctx context.Context,
+	lease *Lease,
 	sr *snowflakeRestful,
 	authenticator string,
 	application string,
@@ -289,7 +291,7 @@ func doAuthenticateByExternalBrowser(
 	if err := openBrowser(loginURL); err == nil {
 		// ---- AUTOMATIC PATH
 		// Block until the browser redirect hits the listener.
-		token, readErr := waitForSamlResponse(ctx, l, application)
+		token, readErr := waitForSamlResponse(ctx, lease, l, application)
 		if readErr != nil {
 			return authenticateByExternalBrowserResult{nil, nil, readErr}
 		}
@@ -310,9 +312,9 @@ func doAuthenticateByExternalBrowser(
 		_ = l.Close()
 
 		fmt.Printf("\t\n\t%s\n\n"+
-		    "\tWe were unable to open a browser window for you.\n"+
-		    "\tPlease open the URL above manually, complete the sign-in, then paste\n"+
-		    "\tthe URL you were finally redirected to here.\n\n", loginURL)
+			"\tWe were unable to open a browser window for you.\n"+
+			"\tPlease open the URL above manually, complete the sign-in, then paste\n"+
+			"\tthe URL you were finally redirected to here.\n\n", loginURL)
 
 		token, perr := manualTokenFallback()
 		if perr != nil {
@@ -335,9 +337,10 @@ func doAuthenticateByExternalBrowser(
 	}
 }
 
-func waitForSamlResponse(ctx context.Context, l net.Listener, application string) (string, error) {
+func waitForSamlResponse(ctx context.Context, lease *Lease, l net.Listener, application string) (string, error) {
 	encodedChan := make(chan string, 1)
 	errChan := make(chan error, 1)
+	ticker := time.NewTicker(leaseTTL / 2)
 
 	go func() {
 		conn, err := l.Accept()
@@ -393,11 +396,17 @@ func waitForSamlResponse(ctx context.Context, l net.Listener, application string
 		encodedChan <- encoded
 	}()
 
-	select {
-	case s := <-encodedChan:
-		return s, nil
-	case e := <-errChan:
-		return "", e
+	for {
+		select {
+		case <-ticker.C:
+			lease.Renew(leaseTTL)
+		case s := <-encodedChan:
+			ticker.Stop()
+			return s, nil
+		case e := <-errChan:
+			ticker.Stop()
+			return "", e
+		}
 	}
 }
 
@@ -414,12 +423,18 @@ func manualTokenFallback() (string, error) {
 	t := term.NewTerminal(os.Stdin, "Paste redirect URL: ")
 
 	for {
-	        // ReadLine echoes & handles Ctrl-C/Z
+		// ReadLine echoes & handles Ctrl-C/Z
 		line, err := t.ReadLine()
-		if err == io.EOF { return "", errors.New("user aborted") }
-		if err != nil   { return "", err }
+		if err == io.EOF {
+			return "", errors.New("user aborted")
+		}
+		if err != nil {
+			return "", err
+		}
 
-		if line == ""   { return "", errors.New("no URL provided") }
+		if line == "" {
+			return "", errors.New("no URL provided")
+		}
 
 		if token, ok := extractToken(line); ok {
 			return token, nil
