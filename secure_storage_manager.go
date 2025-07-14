@@ -5,11 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/99designs/keyring"
 )
 
 const (
@@ -55,13 +59,15 @@ var credentialsStorage = newSecureStorageManager()
 
 func newSecureStorageManager() secureStorageManager {
 	switch runtime.GOOS {
-	case "linux", "darwin", "windows":
+	case "linux", "darwin":
 		ssm, err := newFileBasedSecureStorageManager()
 		if err != nil {
 			logger.Debugf("failed to create credentials cache dir. %v", err)
 			return newNoopSecureStorageManager()
 		}
 		return ssm
+	case "windows":
+		return &threadSafeSecureStorageManager{&sync.Mutex{}, newKeyringBasedSecureStorageManager()}
 	default:
 		logger.Warnf("OS %v does not support credentials cache", runtime.GOOS)
 		return newNoopSecureStorageManager()
@@ -336,6 +342,127 @@ func (ssm *fileBasedSecureStorageManager) writeTemporaryCacheFile(cache map[stri
 	return nil
 }
 
+type keyringSecureStorageManager struct {
+}
+
+func newKeyringBasedSecureStorageManager() *keyringSecureStorageManager {
+	return &keyringSecureStorageManager{}
+}
+
+func (ssm *keyringSecureStorageManager) acquireLease() (*Lease, error) {
+	return &Lease{
+		id:      "keyring-lease",
+		expiry:  time.Now().Add(time.Duration(math.MaxInt64 / 2)),
+		handler: nil,
+	}, nil
+}
+
+func (ssm *keyringSecureStorageManager) setCredential(lease *Lease, tokenSpec *secureTokenSpec, value string) error {
+	if value == "" {
+		logger.Debug("no token provided")
+	} else {
+		credentialsKey, err := tokenSpec.buildKey()
+		if err != nil {
+			logger.Warn(err)
+			return err
+		}
+		if runtime.GOOS == "windows" {
+			ring, _ := keyring.Open(keyring.Config{
+				WinCredPrefix: strings.ToUpper(tokenSpec.host),
+				ServiceName:   strings.ToUpper(tokenSpec.user),
+			})
+			item := keyring.Item{
+				Key:  credentialsKey,
+				Data: []byte(value),
+			}
+			if err := ring.Set(item); err != nil {
+				logger.Debugf("Failed to write to Windows credential manager. Err: %v", err)
+			}
+		} else if runtime.GOOS == "darwin" {
+			ring, _ := keyring.Open(keyring.Config{
+				ServiceName: credentialsKey,
+			})
+			account := strings.ToUpper(tokenSpec.user)
+			item := keyring.Item{
+				Key:  account,
+				Data: []byte(value),
+			}
+			if err := ring.Set(item); err != nil {
+				logger.Debugf("Failed to write to keychain. Err: %v", err)
+			}
+		}
+	}
+	return nil
+}
+
+func (ssm *keyringSecureStorageManager) getCredential(_ *Lease, tokenSpec *secureTokenSpec) (string, error) {
+	cred := ""
+	credentialsKey, err := tokenSpec.buildKey()
+	if err != nil {
+		logger.Warn(err)
+		return "", nil
+	}
+	if runtime.GOOS == "windows" {
+		ring, _ := keyring.Open(keyring.Config{
+			WinCredPrefix: strings.ToUpper(tokenSpec.host),
+			ServiceName:   strings.ToUpper(tokenSpec.user),
+		})
+		i, err := ring.Get(credentialsKey)
+		if err != nil {
+			logger.Debugf("Failed to read credentialsKey or could not find it in Windows Credential Manager. Error: %v", err)
+		}
+		cred = string(i.Data)
+	} else if runtime.GOOS == "darwin" {
+		ring, _ := keyring.Open(keyring.Config{
+			ServiceName: credentialsKey,
+		})
+		account := strings.ToUpper(tokenSpec.user)
+		i, err := ring.Get(account)
+		if err != nil {
+			logger.Debugf("Failed to find the item in keychain or item does not exist. Error: %v", err)
+		}
+		cred = string(i.Data)
+		if cred == "" {
+			logger.Debug("Returned credential is empty")
+		} else {
+			logger.Debug("Successfully read token. Returning as string")
+		}
+	}
+	return cred, nil
+}
+
+func (ssm *keyringSecureStorageManager) deleteCredential(_ *Lease, tokenSpec *secureTokenSpec) error {
+	credentialsKey, err := tokenSpec.buildKey()
+	if err != nil {
+		logger.Warn(err)
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		ring, _ := keyring.Open(keyring.Config{
+			WinCredPrefix: strings.ToUpper(tokenSpec.host),
+			ServiceName:   strings.ToUpper(tokenSpec.user),
+		})
+		err := ring.Remove(string(credentialsKey))
+		if err != nil {
+			logger.Debugf("Failed to delete credentialsKey in Windows Credential Manager. Error: %v", err)
+		}
+	} else if runtime.GOOS == "darwin" {
+		ring, _ := keyring.Open(keyring.Config{
+			ServiceName: credentialsKey,
+		})
+		account := strings.ToUpper(tokenSpec.user)
+		err := ring.Remove(account)
+		if err != nil {
+			logger.Debugf("Failed to delete credentialsKey in keychain. Error: %v", err)
+		}
+	}
+	return nil
+}
+
+func (ssm *keyringSecureStorageManager) releaseLease(_ *Lease) error {
+	return nil
+}
+
 type noopSecureStorageManager struct {
 }
 
@@ -357,4 +484,33 @@ func (ssm *noopSecureStorageManager) getCredential(_ *Lease, _ *secureTokenSpec)
 
 func (ssm *noopSecureStorageManager) deleteCredential(_ *Lease, _ *secureTokenSpec) error {
 	return nil
+}
+
+type threadSafeSecureStorageManager struct {
+	mu       *sync.Mutex
+	delegate secureStorageManager
+}
+
+func (ssm *threadSafeSecureStorageManager) acquireLease() (*Lease, error) {
+	ssm.mu.Lock()
+	defer ssm.mu.Unlock()
+	return ssm.delegate.acquireLease()
+}
+
+func (ssm *threadSafeSecureStorageManager) setCredential(lease *Lease, tokenSpec *secureTokenSpec, value string) error {
+	ssm.mu.Lock()
+	defer ssm.mu.Unlock()
+	return ssm.delegate.setCredential(lease, tokenSpec, value)
+}
+
+func (ssm *threadSafeSecureStorageManager) getCredential(lease *Lease, tokenSpec *secureTokenSpec) (string, error) {
+	ssm.mu.Lock()
+	defer ssm.mu.Unlock()
+	return ssm.delegate.getCredential(lease, tokenSpec)
+}
+
+func (ssm *threadSafeSecureStorageManager) deleteCredential(lease *Lease, tokenSpec *secureTokenSpec) error {
+	ssm.mu.Lock()
+	defer ssm.mu.Unlock()
+	return ssm.delegate.deleteCredential(lease, tokenSpec)
 }
