@@ -1,6 +1,8 @@
 module github.com/snowflakedb/gosnowflake
 
-go 1.22.0
+go 1.23.0
+
+toolchain go1.24.5
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.4.0
