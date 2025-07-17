@@ -88,8 +88,8 @@ type oauthBrowserResult struct {
 func (oauthClient *oauthClient) authenticateByOAuthAuthorizationCode(lease *Lease) (string, error) {
 	accessTokenSpec := oauthClient.accessTokenSpec()
 	if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
-		if accessToken, _ := credentialsStorage.getCredential(lease, accessTokenSpec); accessToken != "" {
-			logger.Debugf("Access token retrieved from cache")
+		if accessToken, err := credentialsStorage.getCredential(lease, accessTokenSpec); accessToken != "" {
+			logger.Debugf("Access token retrieved from cache: %v", err)
 			return accessToken, nil
 		}
 		if refreshToken, _ := credentialsStorage.getCredential(lease, oauthClient.refreshTokenSpec()); refreshToken != "" {
@@ -339,7 +339,10 @@ func (provider *browserBasedAuthorizationCodeProvider) createCodeVerifier() stri
 func (oauthClient *oauthClient) authenticateByOAuthClientCredentials(lease *Lease) (string, error) {
 	accessTokenSpec := oauthClient.accessTokenSpec()
 	if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
-		if accessToken, _ := credentialsStorage.getCredential(lease, accessTokenSpec); accessToken != "" {
+		if accessToken, err := credentialsStorage.getCredential(lease, accessTokenSpec); accessToken != "" {
+			if err != nil {
+				return "", fmt.Errorf("error retrieving access token from cache: %w", err)
+			}
 			return accessToken, nil
 		}
 	}

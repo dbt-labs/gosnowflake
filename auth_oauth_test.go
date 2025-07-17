@@ -184,6 +184,7 @@ func TestUnitOAuthAuthorizationCode(t *testing.T) {
 
 func TestUnitOAuthClientCredentials(t *testing.T) {
 	skipOnMac(t, "keychain requires password")
+	_ = GetLogger().SetLogLevel("warn")
 	cacheTokenSpec := newOAuthAccessTokenSpec(wiremock.connectionConfig().OauthTokenRequestURL, wiremock.connectionConfig().User)
 	crt := newCountingRoundTripper(SnowflakeTransport)
 	httpClient := http.Client{
@@ -292,6 +293,7 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		t.Skip("Github blocks writing to file system")
 	}
 	skipOnMac(t, "keychain requires password")
+	_ = GetLogger().SetLogLevel("warn")
 	currentDefaultAuthorizationCodeProviderFactory := defaultAuthorizationCodeProviderFactory
 	defer func() {
 		defaultAuthorizationCodeProviderFactory = currentDefaultAuthorizationCodeProviderFactory
@@ -572,6 +574,7 @@ func TestClientCredentialsFlow(t *testing.T) {
 	if runningOnGithubAction() && runningOnLinux() {
 		t.Skip("Github blocks writing to file system")
 	}
+	_ = GetLogger().SetLogLevel("warn")
 	currentDefaultAuthorizationCodeProviderFactory := defaultAuthorizationCodeProviderFactory
 	defer func() {
 		defaultAuthorizationCodeProviderFactory = currentDefaultAuthorizationCodeProviderFactory
@@ -786,6 +789,7 @@ func TestEligibleForDefaultClientCredentials(t *testing.T) {
 		},
 	}
 
+	_ = GetLogger().SetLogLevel("warn")
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			result := test.oauthClient.eligibleForDefaultClientCredentials()

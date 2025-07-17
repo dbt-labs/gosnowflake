@@ -600,7 +600,10 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 			sc.cfg.ClientStoreTemporaryCredential = ConfigBoolTrue
 		}
 		if sc.cfg.Authenticator == AuthTypeExternalBrowser && sc.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
-			tok, _ := credentialsStorage.getCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+			tok, err := credentialsStorage.getCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+			if err != nil {
+				logger.WithContext(sc.ctx).Warnf("failed to get ID token from credential storage: %v", err)
+			}
 			sc.cfg.IDToken = tok
 		}
 		// Disable console login by default
@@ -614,7 +617,10 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 			sc.cfg.ClientRequestMfaToken = ConfigBoolTrue
 		}
 		if sc.cfg.ClientRequestMfaToken == ConfigBoolTrue {
-			tok, _ := credentialsStorage.getCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+			tok, err := credentialsStorage.getCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+			if err != nil {
+				logger.WithContext(sc.ctx).Warnf("failed to get MFA token from credential storage: %v", err)
+			}
 			sc.cfg.MfaToken = tok
 		}
 	}

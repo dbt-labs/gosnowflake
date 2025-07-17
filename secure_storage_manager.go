@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -14,8 +13,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/99designs/keyring"
+	"golang.org/x/sys/windows"
 )
 
 const (
@@ -45,11 +46,22 @@ var defaultMacCacheDirConf = []cacheDirConf{
 	{envVar: "HOME", pathSegments: []string{"Library", "Caches", "Snowflake", "Credentials"}},
 }
 
-func defaultUnixCacheDirConf() []cacheDirConf {
-	if runtime.GOOS == "darwin" {
-		return defaultMacCacheDirConf
+func credCacheDirPath() (string, error) {
+	switch runtime.GOOS {
+	case "linux":
+		return buildCredCacheDirPath(defaultLinuxCacheDirConf)
+	case "darwin":
+		return buildCredCacheDirPath(defaultMacCacheDirConf)
+	case "windows":
+		path, err := getKnownFolderPath(FOLDERID_LocalAppData)
+		if err != nil {
+			return "", fmt.Errorf("failed to get Local/AppData folder: %v", err)
+		}
+		path = filepath.Join(path, "Snowflake", "Credentials")
+		return ensureCacheDir(path)
+	default:
+		return "", fmt.Errorf("unsupported OS %v for credentials cache", runtime.GOOS)
 	}
-	return defaultLinuxCacheDirConf
 }
 
 type secureStorageManager interface {
@@ -62,20 +74,20 @@ type secureStorageManager interface {
 var credentialsStorage = newSecureStorageManager()
 
 func newSecureStorageManager() secureStorageManager {
+	var ssm secureStorageManager
+	var err error
 	switch runtime.GOOS {
-	case "linux", "darwin":
-		ssm, err := newFileBasedSecureStorageManager()
-		if err != nil {
-			logger.Debugf("failed to create credentials cache dir. %v", err)
-			return newNoopSecureStorageManager()
-		}
-		return ssm
-	case "windows":
-		return &threadSafeSecureStorageManager{&sync.Mutex{}, newKeyringBasedSecureStorageManager()}
+	case "linux", "darwin", "windows":
+		ssm, err = newFileBasedSecureStorageManager()
 	default:
 		logger.Warnf("OS %v does not support credentials cache", runtime.GOOS)
-		return newNoopSecureStorageManager()
+		ssm = newNoopSecureStorageManager()
 	}
+	if err != nil {
+		logger.Warnf("Failed to create secure storage manager: %v", err)
+		ssm = newNoopSecureStorageManager()
+	}
+	return ssm
 }
 
 type fileBasedSecureStorageManager struct {
@@ -84,17 +96,17 @@ type fileBasedSecureStorageManager struct {
 }
 
 func newFileBasedSecureStorageManager() (*fileBasedSecureStorageManager, error) {
-	credDirPath, err := buildCredCacheDirPath(defaultUnixCacheDirConf())
+	credDirPath, err := credCacheDirPath()
 	if err != nil {
 		return nil, err
 	}
-	lease, err := NewLeaseHandler(filepath.Join(credDirPath, credLeaseFileName), leaseOperationTimeout)
+	leaseHandler, err := NewLeaseHandler(filepath.Join(credDirPath, credLeaseFileName), leaseOperationTimeout)
 	if err != nil {
 		return nil, err
 	}
 	ssm := &fileBasedSecureStorageManager{
 		credDirPath:  credDirPath,
-		leaseHandler: lease,
+		leaseHandler: leaseHandler,
 	}
 	return ssm, nil
 }
@@ -115,14 +127,19 @@ func lookupCacheDir(envVar string, pathSegments ...string) (string, error) {
 	}
 
 	cacheDir := filepath.Join(envVal, filepath.Join(pathSegments...))
-	parentOfCacheDir := cacheDir[:strings.LastIndex(cacheDir, "/")]
+	return ensureCacheDir(cacheDir)
+}
 
-	if err = os.MkdirAll(parentOfCacheDir, os.FileMode(0755)); err != nil {
+func ensureCacheDir(cacheDir string) (string, error) {
+	sep := string(os.PathSeparator)
+	parentOfCacheDir := cacheDir[:strings.LastIndex(cacheDir, sep)]
+
+	if err := os.MkdirAll(parentOfCacheDir, os.FileMode(0755)); err != nil {
 		return "", err
 	}
 
 	// We don't check if permissions are incorrect here if a directory exists, because we check it later.
-	if err = os.Mkdir(cacheDir, os.FileMode(0700)); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := os.Mkdir(cacheDir, os.FileMode(0700)); err != nil && !errors.Is(err, os.ErrExist) {
 		return "", err
 	}
 
@@ -161,7 +178,7 @@ func (ssm *fileBasedSecureStorageManager) acquireLease() (*Lease, error) {
 	return ssm.leaseHandler.Acquire(leaseTTL)
 }
 
-func (ssm *fileBasedSecureStorageManager) withCacheFile(lease *Lease, action func(*os.File)) error {
+func (ssm *fileBasedSecureStorageManager) withCacheFile(lease *Lease, action func(*os.File) error) error {
 	err := lease.Renew(leaseTTL / 2)
 	if err != nil {
 		logger.Warnf("Unable to lease cache. %v", err)
@@ -188,25 +205,29 @@ func (ssm *fileBasedSecureStorageManager) withCacheFile(lease *Lease, action fun
 		}
 	}(cacheDir)
 
-	if err := ensureFileOwner(cacheFile); err != nil {
-		logger.Warnf("failed to ensure owner for temporary cache file. %v", err)
-		return err
-	}
-	if err := ensureFilePermissions(cacheFile, 0600); err != nil {
-		logger.Warnf("failed to ensure permission for temporary cache file. %v", err)
-		return err
-	}
-	if err := ensureFileOwner(cacheDir); err != nil {
-		logger.Warnf("failed to ensure owner for temporary cache dir. %v", err)
-		return err
-	}
-	if err := ensureFilePermissions(cacheDir, 0700|os.ModeDir); err != nil {
-		logger.Warnf("failed to ensure permission for temporary cache dir. %v", err)
-		return err
+	// Ensure secure permissions on POSIX systems. On Windows, the Windows Data
+	// Protection API is used to secure the credentials (more secure than file
+	// permissions).
+	if runtime.GOOS != "windows" {
+		if err := ensureFileOwner(cacheFile); err != nil {
+			logger.Warnf("failed to ensure owner for temporary cache file. %v", err)
+			return err
+		}
+		if err := ensureFilePermissions(cacheFile, 0600); err != nil {
+			logger.Warnf("failed to ensure permission for temporary cache file. %v", err)
+			return err
+		}
+		if err := ensureFileOwner(cacheDir); err != nil {
+			logger.Warnf("failed to ensure owner for temporary cache dir. %v", err)
+			return err
+		}
+		if err := ensureFilePermissions(cacheDir, 0700|os.ModeDir); err != nil {
+			logger.Warnf("failed to ensure permission for temporary cache dir. %v", err)
+			return err
+		}
 	}
 
-	action(cacheFile)
-	return nil
+	return action(cacheFile)
 }
 
 func (ssm *fileBasedSecureStorageManager) setCredential(lease *Lease, tokenSpec *secureTokenSpec, value string) error {
@@ -225,19 +246,17 @@ func (ssm *fileBasedSecureStorageManager) setCredential(lease *Lease, tokenSpec 
 		return err
 	}
 
-	return ssm.withCacheFile(lease, func(cacheFile *os.File) {
+	return ssm.withCacheFile(lease, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file: %v", err)
-			return
+			return err
 		}
 		tokens := ssm.getTokens(credCache)
 		tokens[credentialsKey] = value
 		credCache["tokens"] = tokens
 
-		if err := ssm.writeTemporaryCacheFile(credCache, cacheFile); err != nil {
-			logger.Warnf("Set credential failed: %v", err)
-		}
+		return ssm.writeTemporaryCacheFile(credCache, cacheFile)
 	})
 }
 
@@ -248,23 +267,24 @@ func (ssm *fileBasedSecureStorageManager) getCredential(lease *Lease, tokenSpec 
 	}
 
 	ret := ""
-	err = ssm.withCacheFile(lease, func(cacheFile *os.File) {
+	err = ssm.withCacheFile(lease, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
-			return
+			return err
 		}
 		cred, ok := ssm.getTokens(credCache)[credentialsKey]
 		if !ok {
-			return
+			return nil
 		}
 
 		credStr, ok := cred.(string)
 		if !ok {
-			return
+			return nil
 		}
 
 		ret = credStr
+		return nil
 	})
 	return ret, err
 }
@@ -303,7 +323,7 @@ func ensureFilePermissions(f *os.File, expectedMode os.FileMode) error {
 }
 
 func (ssm *fileBasedSecureStorageManager) readTemporaryCacheFile(cacheFile *os.File) (map[string]any, error) {
-	jsonData, err := io.ReadAll(cacheFile)
+	data, err := io.ReadAll(cacheFile)
 	if err != nil {
 		logger.Warnf("Failed to read credential cache file. %v.\n", err)
 		return map[string]any{}, nil
@@ -312,6 +332,26 @@ func (ssm *fileBasedSecureStorageManager) readTemporaryCacheFile(cacheFile *os.F
 		return map[string]any{}, fmt.Errorf("cannot seek to the beginning of a cache file. %v", err)
 	}
 
+	var jsonData []byte
+	if runtime.GOOS == "windows" && len(data) > 0 {
+		ciphertext := windows.DataBlob{
+			Size: uint32(len(data)),
+			Data: &data[0],
+		}
+		plaintext := windows.DataBlob{
+			Size: 0,
+			Data: nil,
+		}
+		// https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata
+		err = windows.CryptUnprotectData(&ciphertext, nil, nil, 0, nil, windows.CRYPTPROTECT_UI_FORBIDDEN, &plaintext)
+		if err != nil {
+			return map[string]any{}, fmt.Errorf("failed to decrypt credential cache file. %v", err)
+		}
+		jsonData = unsafe.Slice(plaintext.Data, plaintext.Size)
+		defer windows.LocalFree(windows.Handle(unsafe.Pointer(plaintext.Data)))
+	} else {
+		jsonData = data
+	}
 	if len(jsonData) == 0 {
 		// Happens when the file didn't exist before.
 		return map[string]any{}, nil
@@ -333,18 +373,15 @@ func (ssm *fileBasedSecureStorageManager) deleteCredential(lease *Lease, tokenSp
 		return err
 	}
 
-	return ssm.withCacheFile(lease, func(cacheFile *os.File) {
+	return ssm.withCacheFile(lease, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
-			return
+			return err
 		}
 		delete(ssm.getTokens(credCache), credentialsKey)
 
-		err = ssm.writeTemporaryCacheFile(credCache, cacheFile)
-		if err != nil {
-			logger.Warnf("Set credential failed. Unable to write cache. %v", err)
-		}
+		return ssm.writeTemporaryCacheFile(credCache, cacheFile)
 	})
 }
 
@@ -357,6 +394,22 @@ func (ssm *fileBasedSecureStorageManager) writeTemporaryCacheFile(cache map[stri
 	if err = cacheFile.Truncate(0); err != nil {
 		return fmt.Errorf("error while truncating credentials cache. %v", err)
 	}
+	if runtime.GOOS == "windows" {
+		plaintext := windows.DataBlob{
+			Size: uint32(len(bytes)),
+			Data: &bytes[0],
+		}
+		ciphertext := windows.DataBlob{
+			Size: 0,
+			Data: nil,
+		}
+		err = windows.CryptProtectData(&plaintext, nil, nil, 0, nil, windows.CRYPTPROTECT_UI_FORBIDDEN, &ciphertext)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt credential cache file: %w", err)
+		}
+		bytes = unsafe.Slice(ciphertext.Data, ciphertext.Size)
+		defer windows.LocalFree(windows.Handle(unsafe.Pointer(ciphertext.Data)))
+	}
 	_, err = cacheFile.Write(bytes)
 	if err != nil {
 		return fmt.Errorf("failed to write the credential cache file: %w", err)
@@ -365,21 +418,33 @@ func (ssm *fileBasedSecureStorageManager) writeTemporaryCacheFile(cache map[stri
 }
 
 type keyringSecureStorageManager struct {
+	leaseHandler *LeaseHandler
 }
 
-func newKeyringBasedSecureStorageManager() *keyringSecureStorageManager {
-	return &keyringSecureStorageManager{}
+func newKeyringBasedSecureStorageManager() (*keyringSecureStorageManager, error) {
+	credDirPath, err := credCacheDirPath()
+	if err != nil {
+		return nil, err
+	}
+	leaseHandler, err := NewLeaseHandler(filepath.Join(credDirPath, credLeaseFileName), leaseOperationTimeout)
+	if err != nil {
+		return nil, err
+	}
+	ssm := &keyringSecureStorageManager{
+		leaseHandler: leaseHandler,
+	}
+	return ssm, nil
 }
 
 func (ssm *keyringSecureStorageManager) acquireLease() (*Lease, error) {
-	return &Lease{
-		id:      "keyring-lease",
-		expiry:  time.Now().Add(time.Duration(math.MaxInt64 / 2)),
-		handler: nil,
-	}, nil
+	return ssm.leaseHandler.Acquire(leaseTTL)
 }
 
 func (ssm *keyringSecureStorageManager) setCredential(lease *Lease, tokenSpec *secureTokenSpec, value string) error {
+	err := lease.Renew(leaseTTL / 2)
+	if err != nil {
+		return err
+	}
 	if value == "" {
 		logger.Debug("no token provided")
 	} else {
@@ -389,21 +454,28 @@ func (ssm *keyringSecureStorageManager) setCredential(lease *Lease, tokenSpec *s
 			return err
 		}
 		if runtime.GOOS == "windows" {
-			ring, _ := keyring.Open(keyring.Config{
+			ring, err := keyring.Open(keyring.Config{
 				WinCredPrefix: strings.ToUpper(tokenSpec.host),
 				ServiceName:   strings.ToUpper(tokenSpec.user),
 			})
+			if err != nil {
+				return err
+			}
 			item := keyring.Item{
 				Key:  credentialsKey,
 				Data: []byte(value),
 			}
 			if err := ring.Set(item); err != nil {
-				logger.Debugf("Failed to write to Windows credential manager. Err: %v", err)
+				logger.Warnf("Failed to write to Windows credential manager. Err: %v", err)
+				return err
 			}
 		} else if runtime.GOOS == "darwin" {
-			ring, _ := keyring.Open(keyring.Config{
+			ring, err := keyring.Open(keyring.Config{
 				ServiceName: credentialsKey,
 			})
+			if err != nil {
+				return err
+			}
 			account := strings.ToUpper(tokenSpec.user)
 			item := keyring.Item{
 				Key:  account,
@@ -411,37 +483,50 @@ func (ssm *keyringSecureStorageManager) setCredential(lease *Lease, tokenSpec *s
 			}
 			if err := ring.Set(item); err != nil {
 				logger.Debugf("Failed to write to keychain. Err: %v", err)
+				return err
 			}
 		}
 	}
 	return nil
 }
 
-func (ssm *keyringSecureStorageManager) getCredential(_ *Lease, tokenSpec *secureTokenSpec) (string, error) {
+func (ssm *keyringSecureStorageManager) getCredential(lease *Lease, tokenSpec *secureTokenSpec) (string, error) {
 	cred := ""
+	err := lease.Renew(leaseTTL / 2)
+	if err != nil {
+		return cred, err
+	}
 	credentialsKey, err := tokenSpec.buildKey()
 	if err != nil {
 		logger.Warn(err)
 		return "", nil
 	}
 	if runtime.GOOS == "windows" {
-		ring, _ := keyring.Open(keyring.Config{
+		ring, err := keyring.Open(keyring.Config{
 			WinCredPrefix: strings.ToUpper(tokenSpec.host),
 			ServiceName:   strings.ToUpper(tokenSpec.user),
 		})
+		if err != nil {
+			return cred, err
+		}
 		i, err := ring.Get(credentialsKey)
 		if err != nil {
 			logger.Debugf("Failed to read credentialsKey or could not find it in Windows Credential Manager. Error: %v", err)
+			return cred, err
 		}
 		cred = string(i.Data)
 	} else if runtime.GOOS == "darwin" {
-		ring, _ := keyring.Open(keyring.Config{
+		ring, err := keyring.Open(keyring.Config{
 			ServiceName: credentialsKey,
 		})
+		if err != nil {
+			return cred, err
+		}
 		account := strings.ToUpper(tokenSpec.user)
 		i, err := ring.Get(account)
 		if err != nil {
 			logger.Debugf("Failed to find the item in keychain or item does not exist. Error: %v", err)
+			return cred, err
 		}
 		cred = string(i.Data)
 		if cred == "" {
@@ -453,35 +538,43 @@ func (ssm *keyringSecureStorageManager) getCredential(_ *Lease, tokenSpec *secur
 	return cred, nil
 }
 
-func (ssm *keyringSecureStorageManager) deleteCredential(_ *Lease, tokenSpec *secureTokenSpec) error {
+func (ssm *keyringSecureStorageManager) deleteCredential(lease *Lease, tokenSpec *secureTokenSpec) error {
+	err := lease.Renew(leaseTTL / 2)
+	if err != nil {
+		return err
+	}
 	credentialsKey, err := tokenSpec.buildKey()
 	if err != nil {
 		logger.Warn(err)
 		return nil
 	}
 	if runtime.GOOS == "windows" {
-		ring, _ := keyring.Open(keyring.Config{
+		ring, err := keyring.Open(keyring.Config{
 			WinCredPrefix: strings.ToUpper(tokenSpec.host),
 			ServiceName:   strings.ToUpper(tokenSpec.user),
 		})
-		err := ring.Remove(string(credentialsKey))
+		if err != nil {
+			return err
+		}
+		err = ring.Remove(string(credentialsKey))
 		if err != nil {
 			logger.Debugf("Failed to delete credentialsKey in Windows Credential Manager. Error: %v", err)
+			return err
 		}
 	} else if runtime.GOOS == "darwin" {
-		ring, _ := keyring.Open(keyring.Config{
+		ring, err := keyring.Open(keyring.Config{
 			ServiceName: credentialsKey,
 		})
+		if err != nil {
+			return err
+		}
 		account := strings.ToUpper(tokenSpec.user)
-		err := ring.Remove(account)
+		err = ring.Remove(account)
 		if err != nil {
 			logger.Debugf("Failed to delete credentialsKey in keychain. Error: %v", err)
+			return err
 		}
 	}
-	return nil
-}
-
-func (ssm *keyringSecureStorageManager) releaseLease(_ *Lease) error {
 	return nil
 }
 
