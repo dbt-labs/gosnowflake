@@ -126,10 +126,10 @@ func (l *LeaseHandler) write(leaseId *string, expiry time.Time) error {
 	if err != nil {
 		return err
 	}
+	defer os.Remove(f.Name())
 	expiry = expiry.Add(gracePeriod) // compensate for the wait after the write
 	if _, err := fmt.Fprintf(f, "%s\r\n%d\r\n%d\r\n", *leaseId, ctime.UnixMilli(), expiry.UnixMilli()); err != nil {
 		_ = f.Close()
-		_ = os.Remove(f.Name())
 		return err
 	}
 	if err := f.Close(); err != nil {
