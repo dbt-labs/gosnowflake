@@ -403,6 +403,7 @@ func (ssm *fileBasedSecureStorageManager) writeTemporaryCacheFile(cache map[stri
 			Size: 0,
 			Data: nil,
 		}
+		// https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata
 		err = windows.CryptProtectData(&plaintext, nil, nil, 0, nil, windows.CRYPTPROTECT_UI_FORBIDDEN, &ciphertext)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt credential cache file: %w", err)
