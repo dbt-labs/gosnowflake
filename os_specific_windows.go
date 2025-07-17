@@ -26,6 +26,7 @@ func getFileContents(filePath string, expectedPerm os.FileMode) ([]byte, error) 
 }
 
 var (
+	// TODO(felipecrv): use sys/windows for SHGetKnownFolderPath()
 	modShell32               = syscall.NewLazyDLL("Shell32.dll")
 	procSHGetKnownFolderPath = modShell32.NewProc("SHGetKnownFolderPath")
 
@@ -73,6 +74,10 @@ func getKnownFolderPath(folderId syscall.GUID) (string, error) {
 
 	// Convert UTF-16 to a Go string
 	return syscall.UTF16ToString((*[1 << 16]uint16)(unsafe.Pointer(raw))[:]), nil
+}
+
+func getLocalAppDataPath() (string, error) {
+	return getKnownFolderPath(FOLDERID_LocalAppData)
 }
 
 func cryptProtectData(data []byte) ([]byte, error) {

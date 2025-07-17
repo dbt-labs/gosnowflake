@@ -63,6 +63,10 @@ func validateFilePermissionBits(f *os.File, expectedPerm os.FileMode) error {
 	return nil
 }
 
+func getLocalAppDataPath() (string, error) {
+	panic("getLocalAppDataPath is not implemented for POSIX systems, only for Windows")
+}
+
 func marshalCredentialsData(cache map[string]any) ([]byte, error) {
 	// On POSIX systems, we rely on stricter permissions rather than
 	// encryption using the Windows DPAPI.
