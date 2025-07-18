@@ -13,9 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
 
 const (
@@ -333,21 +330,10 @@ func (ssm *fileBasedSecureStorageManager) readTemporaryCacheFile(cacheFile *os.F
 
 	var jsonData []byte
 	if runtime.GOOS == "windows" && len(data) > 0 {
-		ciphertext := windows.DataBlob{
-			Size: uint32(len(data)),
-			Data: &data[0],
-		}
-		plaintext := windows.DataBlob{
-			Size: 0,
-			Data: nil,
-		}
-		// https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata
-		err = windows.CryptUnprotectData(&ciphertext, nil, nil, 0, nil, windows.CRYPTPROTECT_UI_FORBIDDEN, &plaintext)
+		jsonData, err = cryptUnprotectData(data)
 		if err != nil {
 			return map[string]any{}, fmt.Errorf("failed to decrypt credential cache file. %v", err)
 		}
-		jsonData = unsafe.Slice(plaintext.Data, plaintext.Size)
-		defer windows.LocalFree(windows.Handle(unsafe.Pointer(plaintext.Data)))
 	} else {
 		jsonData = data
 	}
@@ -394,21 +380,10 @@ func (ssm *fileBasedSecureStorageManager) writeTemporaryCacheFile(cache map[stri
 		return fmt.Errorf("error while truncating credentials cache. %v", err)
 	}
 	if runtime.GOOS == "windows" {
-		plaintext := windows.DataBlob{
-			Size: uint32(len(bytes)),
-			Data: &bytes[0],
-		}
-		ciphertext := windows.DataBlob{
-			Size: 0,
-			Data: nil,
-		}
-		// https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata
-		err = windows.CryptProtectData(&plaintext, nil, nil, 0, nil, windows.CRYPTPROTECT_UI_FORBIDDEN, &ciphertext)
+		bytes, err = cryptProtectData(bytes)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt credential cache file: %w", err)
 		}
-		bytes = unsafe.Slice(ciphertext.Data, ciphertext.Size)
-		defer windows.LocalFree(windows.Handle(unsafe.Pointer(ciphertext.Data)))
 	}
 	_, err = cacheFile.Write(bytes)
 	if err != nil {

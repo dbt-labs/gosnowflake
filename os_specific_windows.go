@@ -8,6 +8,8 @@ import (
 	"os"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 func provideFileOwner(file *os.File) (uint32, error) {
@@ -70,4 +72,52 @@ func getKnownFolderPath(folderId syscall.GUID) (string, error) {
 
 	// Convert UTF-16 to a Go string
 	return syscall.UTF16ToString((*[1 << 16]uint16)(unsafe.Pointer(raw))[:]), nil
+}
+
+func cryptProtectData(data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	plaintext := windows.DataBlob{
+		Size: uint32(len(data)),
+		Data: &data[0],
+	}
+	ciphertext := windows.DataBlob{
+		Size: 0,
+		Data: nil,
+	}
+	// https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata
+	err := windows.CryptProtectData(&plaintext, nil, nil, 0, nil, windows.CRYPTPROTECT_UI_FORBIDDEN, &ciphertext)
+	if err != nil {
+		return nil, err
+	}
+	defer windows.LocalFree(windows.Handle(unsafe.Pointer(ciphertext.Data)))
+	slice := unsafe.Slice(ciphertext.Data, ciphertext.Size)
+	result := make([]byte, len(slice))
+	copy(result, slice)
+	return result, nil
+}
+
+func cryptUnprotectData(data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	ciphertext := windows.DataBlob{
+		Size: uint32(len(data)),
+		Data: &data[0],
+	}
+	plaintext := windows.DataBlob{
+		Size: 0,
+		Data: nil,
+	}
+	// https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata
+	err := windows.CryptUnprotectData(&ciphertext, nil, nil, 0, nil, windows.CRYPTPROTECT_UI_FORBIDDEN, &plaintext)
+	if err != nil {
+		return nil, err
+	}
+	defer windows.LocalFree(windows.Handle(unsafe.Pointer(plaintext.Data)))
+	slice := unsafe.Slice(plaintext.Data, plaintext.Size)
+	result := make([]byte, len(slice))
+	copy(result, slice)
+	return result, nil
 }
