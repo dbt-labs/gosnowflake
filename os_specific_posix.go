@@ -3,6 +3,7 @@
 package gosnowflake
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -60,4 +61,27 @@ func validateFilePermissionBits(f *os.File, expectedPerm os.FileMode) error {
 		return fmt.Errorf("incorrect permissions of %s", f.Name())
 	}
 	return nil
+}
+
+func getLocalAppDataPath() (string, error) {
+	panic("getLocalAppDataPath is not implemented for POSIX systems, only for Windows")
+}
+
+func marshalCredentialsData(cache map[string]any) ([]byte, error) {
+	// On POSIX systems, we rely on stricter permissions rather than
+	// encryption using the Windows DPAPI.
+	return json.Marshal(cache)
+}
+
+func unmarshalCredentialsData(data []byte) (map[string]any, error) {
+	if len(data) == 0 {
+		return map[string]any{}, nil
+	}
+
+	var credentialsMap map[string]any
+	err := json.Unmarshal(data, &credentialsMap)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal credential cache file. %w", err)
+	}
+	return credentialsMap, nil
 }
