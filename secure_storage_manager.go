@@ -1,7 +1,6 @@
 package gosnowflake
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -328,26 +327,10 @@ func (ssm *fileBasedSecureStorageManager) readTemporaryCacheFile(cacheFile *os.F
 		return map[string]any{}, fmt.Errorf("cannot seek to the beginning of a cache file. %v", err)
 	}
 
-	var jsonData []byte
-	if runtime.GOOS == "windows" && len(data) > 0 {
-		jsonData, err = cryptUnprotectData(data)
-		if err != nil {
-			return map[string]any{}, fmt.Errorf("failed to decrypt credential cache file. %v", err)
-		}
-	} else {
-		jsonData = data
-	}
-	if len(jsonData) == 0 {
-		// Happens when the file didn't exist before.
-		return map[string]any{}, nil
-	}
-
-	credentialsMap := map[string]any{}
-	err = json.Unmarshal(jsonData, &credentialsMap)
+	credentialsMap, err := unmarshalCredentialsData(data)
 	if err != nil {
-		return map[string]any{}, fmt.Errorf("failed to unmarshal credential cache file. %v", err)
+		return map[string]any{}, err
 	}
-
 	return credentialsMap, nil
 }
 
@@ -371,20 +354,15 @@ func (ssm *fileBasedSecureStorageManager) deleteCredential(lease *Lease, tokenSp
 }
 
 func (ssm *fileBasedSecureStorageManager) writeTemporaryCacheFile(cache map[string]any, cacheFile *os.File) error {
-	bytes, err := json.Marshal(cache)
-	if err != nil {
-		return fmt.Errorf("failed to marshal credential cache map. %w", err)
-	}
-
-	if err = cacheFile.Truncate(0); err != nil {
+	if err := cacheFile.Truncate(0); err != nil {
 		return fmt.Errorf("error while truncating credentials cache. %v", err)
 	}
-	if runtime.GOOS == "windows" {
-		bytes, err = cryptProtectData(bytes)
-		if err != nil {
-			return fmt.Errorf("failed to encrypt credential cache file: %w", err)
-		}
+
+	bytes, err := marshalCredentialsData(cache)
+	if err != nil {
+		return err
 	}
+
 	_, err = cacheFile.Write(bytes)
 	if err != nil {
 		return fmt.Errorf("failed to write the credential cache file: %w", err)

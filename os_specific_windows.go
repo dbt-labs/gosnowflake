@@ -3,6 +3,7 @@
 package gosnowflake
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -120,4 +121,35 @@ func cryptUnprotectData(data []byte) ([]byte, error) {
 	result := make([]byte, len(slice))
 	copy(result, slice)
 	return result, nil
+}
+
+func marshalCredentialsData(cache map[string]any) ([]byte, error) {
+	bytes, err := json.Marshal(cache)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal credential cache map. %w", err)
+	}
+
+	bytes, err = cryptProtectData(bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt credential cache file: %w", err)
+	}
+	return bytes, nil
+}
+
+func unmarshalCredentialsData(data []byte) (map[string]any, error) {
+	if len(data) == 0 {
+		return map[string]any{}, nil
+	}
+
+	data, err := cryptUnprotectData(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt credential cache file: %w", err)
+	}
+
+	var credentialsMap map[string]any
+	err = json.Unmarshal(data, &credentialsMap)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal credential cache file. %w", err)
+	}
+	return credentialsMap, nil
 }
