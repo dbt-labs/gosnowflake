@@ -49,6 +49,7 @@ const (
 	// AuthTypeTokenAccessor is to use the provided token accessor and bypass authentication
 	AuthTypeTokenAccessor
 	// AuthTypeUsernamePasswordMFA is to use username and password with mfa
+	// Associated to newMfaTokenSpec
 	AuthTypeUsernamePasswordMFA
 	// AuthTypePat is to use programmatic access token
 	AuthTypePat
@@ -448,7 +449,8 @@ func authenticate(
 	}
 	logger.WithContext(ctx).Info("Authentication SUCCESS")
 	sc.rest.TokenAccessor.SetTokens(respd.Data.Token, respd.Data.MasterToken, respd.Data.SessionID)
-	if sessionParameters[clientRequestMfaToken] == true {
+
+	if sessionParameters[clientRequestMfaToken] == true && sc.cfg.Authenticator == AuthTypeUsernamePasswordMFA {
 		token := respd.Data.MfaToken
 		credentialsStorage.setCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User), token)
 	}
@@ -763,16 +765,25 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 			if isEligibleForParallelLogin(sc.cfg, sc.cfg.ClientRequestMfaToken) {
 				valueAwaiter := valueAwaitHolder.get(mfaTokenLockKey)
 				defer valueAwaiter.resumeOne()
-				sc.cfg.MfaToken, _ = awaitValue(valueAwaiter, func() (string, error) {
-					tok, _ := credentialsStorage.getCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
-					return tok, nil
-				}, func(s string, err error) bool {
-					return s != ""
-				}, func() string {
-					return ""
-				})
+				sc.cfg.MfaToken, _ = awaitValue(
+					valueAwaiter,
+					func() (string, error) {
+						tok, err := credentialsStorage.getCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
+						if err != nil {
+							logger.WithContext(sc.ctx).Warnf("failed to get MFA token from credential storage: %v", err)
+						}
+						return tok, nil
+					}, func(s string, err error) bool {
+						return s != ""
+					}, func() string {
+						return ""
+					},
+				)
 			} else if sc.cfg.ClientRequestMfaToken == ConfigBoolTrue {
-				tok, _ := credentialsStorage.getCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
+				tok, err := credentialsStorage.getCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
+				if err != nil {
+					logger.WithContext(sc.ctx).Warnf("failed to get MFA token from credential storage: %v", err)
+				}
 				sc.cfg.MfaToken = tok
 			}
 		}
