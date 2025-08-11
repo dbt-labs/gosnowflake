@@ -186,7 +186,7 @@ func (ssm *fileBasedSecureStorageManager) withCacheFile(lease *Lease, action fun
 	path := ssm.credFilePath()
 	if _, statErr := os.Stat(path); statErr == nil {
 		if chmodErr := os.Chmod(path, 0600); chmodErr == nil {
-			logger.Infof("restricted on existing cache file %v to 0600 permissions", path)
+			logger.Infof("Set existing cache file %v to 0600 permissions (owner read/write only)", path)
 		} else {
 			logger.Warnf("could not force 0600 on existing cache file %v: %v", path, chmodErr)
 		}
