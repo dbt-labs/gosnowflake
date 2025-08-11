@@ -48,6 +48,7 @@ const (
 	// AuthTypeTokenAccessor is to use the provided token accessor and bypass authentication
 	AuthTypeTokenAccessor
 	// AuthTypeUsernamePasswordMFA is to use username and password with mfa
+	// Associated to newMfaTokenSpec
 	AuthTypeUsernamePasswordMFA
 	// AuthTypePat is to use programmatic access token
 	AuthTypePat
@@ -416,7 +417,8 @@ func authenticate(
 	}
 	logger.WithContext(ctx).Info("Authentication SUCCESS")
 	sc.rest.TokenAccessor.SetTokens(respd.Data.Token, respd.Data.MasterToken, respd.Data.SessionID)
-	if sessionParameters[clientRequestMfaToken] == true {
+
+	if sessionParameters[clientRequestMfaToken] == true && sc.cfg.Authenticator == AuthTypeUsernamePasswordMFA {
 		token := respd.Data.MfaToken
 		credentialsStorage.setCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User), token)
 	}
@@ -619,7 +621,7 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 			sc.cfg.ClientRequestMfaToken = ConfigBoolTrue
 		}
 		if sc.cfg.ClientRequestMfaToken == ConfigBoolTrue {
-			tok, err := credentialsStorage.getCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+			tok, err := credentialsStorage.getCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
 			if err != nil {
 				logger.WithContext(sc.ctx).Warnf("failed to get MFA token from credential storage: %v", err)
 			}
