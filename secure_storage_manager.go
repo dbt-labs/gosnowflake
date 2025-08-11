@@ -317,18 +317,25 @@ func ensureFileOwner(f *os.File) error {
 // a zombie cache file with no path to recovery. This gives a path to recovery.
 // If the file exists, try to secure its perms before opening
 func tryRemediateFilePermissions(f *os.File, expectedMode os.FileMode) {
-	_, err := f.Stat()
+	info, err := f.Stat()
 	if err != nil {
+		// With an open FD, ENOENT is unlikely; warn on real errors and return.
 		if !errors.Is(err, os.ErrNotExist) {
-			logger.Warnf("could not stat %v: %v", f.Name(), err)
+			logger.Warnf("could not stat %s: %v", f.Name(), err)
 		}
 		return
 	}
 
+	current := info.Mode().Perm()
+	if current == expectedMode {
+		// No-op: silently return
+		return
+	}
+
 	if chmodErr := f.Chmod(expectedMode); chmodErr == nil {
-		logger.Infof("Set existing file %v to %04o permissions", f.Name(), expectedMode)
+		logger.Infof("Set existing file %s to %04o permissions", f.Name(), expectedMode)
 	} else {
-		logger.Warnf("could not force %04o on existing file %v: %v", expectedMode, f.Name(), chmodErr)
+		logger.Warnf("could not force %04o on existing file %s: %v", expectedMode, f.Name(), chmodErr)
 	}
 }
 
