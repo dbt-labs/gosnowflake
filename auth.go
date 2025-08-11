@@ -39,6 +39,7 @@ const (
 	// AuthTypeOAuth is the OAuth authentication
 	AuthTypeOAuth
 	// AuthTypeExternalBrowser is to use a browser to access an Fed and perform SSO authentication
+	// Associated to newIDTokenSpec
 	AuthTypeExternalBrowser
 	// AuthTypeOkta is to use a native okta URL to perform SSO authentication on Okta
 	AuthTypeOkta
@@ -419,7 +420,8 @@ func authenticate(
 		token := respd.Data.MfaToken
 		credentialsStorage.setCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User), token)
 	}
-	if sessionParameters[clientStoreTemporaryCredential] == true {
+
+	if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator == AuthTypeExternalBrowser {
 		token := respd.Data.IDToken
 		// XXX: for some reason, token is empty here some times and we
 		// don't want to clear the cache, so let's skip it if it's empty
@@ -596,7 +598,7 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 	defer lease.Release()
 
 	if sc.cfg.Authenticator == AuthTypeExternalBrowser || sc.cfg.Authenticator == AuthTypeOAuthAuthorizationCode || sc.cfg.Authenticator == AuthTypeOAuthClientCredentials {
-		if (runtime.GOOS == "windows" || runtime.GOOS == "darwin") && sc.cfg.ClientStoreTemporaryCredential == configBoolNotSet {
+		if isCacheSupportedGOOS(runtime.GOOS) && sc.cfg.ClientStoreTemporaryCredential == configBoolNotSet {
 			sc.cfg.ClientStoreTemporaryCredential = ConfigBoolTrue
 		}
 		if sc.cfg.Authenticator == AuthTypeExternalBrowser && sc.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {

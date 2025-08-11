@@ -71,13 +71,13 @@ var credentialsStorage = newSecureStorageManager()
 func newSecureStorageManager() secureStorageManager {
 	var ssm secureStorageManager
 	var err error
-	switch runtime.GOOS {
-	case "linux", "darwin", "windows":
+	if isCacheSupportedGOOS(runtime.GOOS) {
 		ssm, err = newFileBasedSecureStorageManager()
-	default:
+	} else {
 		logger.Warnf("OS %v does not support credentials cache", runtime.GOOS)
 		ssm = newNoopSecureStorageManager()
 	}
+
 	if err != nil {
 		logger.Warnf("Failed to create secure storage manager: %v", err)
 		ssm = newNoopSecureStorageManager()
