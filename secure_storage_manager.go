@@ -179,14 +179,27 @@ func (ssm *fileBasedSecureStorageManager) withCacheFile(lease *Lease, action fun
 		logger.Warnf("Unable to lease cache. %v", err)
 		return err
 	}
-	cacheFile, err := os.OpenFile(ssm.credFilePath(), os.O_CREATE|os.O_RDWR, 0600)
+
+	// Users may manually create or save over the credential cache file leading to the presence of
+	// a zombie cache file with no path to recovery. This gives a path to recovery.
+	// If the file exists, try to secure its perms before opening
+	path := ssm.credFilePath()
+	if _, statErr := os.Stat(path); statErr == nil {
+		if chmodErr := os.Chmod(path, 0600); chmodErr == nil {
+			logger.Infof("restricted on existing cache file %v to 0600 permissions", path)
+		} else {
+			logger.Warnf("could not force 0600 on existing cache file %v: %v", path, chmodErr)
+		}
+	}
+
+	cacheFile, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		logger.Warnf("cannot access %v. %v", ssm.credFilePath(), err)
+		logger.Warnf("cannot access %v. %v", path, err)
 		return err
 	}
 	defer func(file *os.File) {
 		if err := file.Close(); err != nil {
-			logger.Warnf("cannot release file descriptor for %v. %v", ssm.credFilePath(), err)
+			logger.Warnf("cannot release file descriptor for %v. %v", path, err)
 		}
 	}(cacheFile)
 
