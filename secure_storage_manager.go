@@ -180,19 +180,11 @@ func (ssm *fileBasedSecureStorageManager) withCacheFile(lease *Lease, action fun
 		return err
 	}
 
-	// Users may manually create or save over the credential cache file leading to the presence of
-	// a zombie cache file with no path to recovery. This gives a path to recovery.
-	// If the file exists, try to secure its perms before opening
-	path := ssm.credFilePath()
-	if _, statErr := os.Stat(path); statErr == nil {
-		if chmodErr := os.Chmod(path, 0600); chmodErr == nil {
-			logger.Infof("Set existing cache file %v to 0600 permissions (owner read/write only)", path)
-		} else {
-			logger.Warnf("could not force 0600 on existing cache file %v: %v", path, chmodErr)
-		}
-	}
+	const cachefilePermissions = 0600
 
-	cacheFile, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	path := ssm.credFilePath()
+
+	cacheFile, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, cachefilePermissions)
 	if err != nil {
 		logger.Warnf("cannot access %v. %v", path, err)
 		return err
@@ -221,7 +213,9 @@ func (ssm *fileBasedSecureStorageManager) withCacheFile(lease *Lease, action fun
 			logger.Warnf("failed to ensure owner for temporary cache file. %v", err)
 			return err
 		}
-		if err := ensureFilePermissions(cacheFile, 0600); err != nil {
+
+		tryRemediateFilePermissions(cacheFile, cachefilePermissions)
+		if err := ensureFilePermissions(cacheFile, cachefilePermissions); err != nil {
 			logger.Warnf("failed to ensure permission for temporary cache file. %v", err)
 			return err
 		}
@@ -317,6 +311,25 @@ func ensureFileOwner(f *os.File) error {
 		return errors.New("incorrect owner of " + f.Name())
 	}
 	return nil
+}
+
+// Users may manually create or save over the credential cache file leading to the presence of
+// a zombie cache file with no path to recovery. This gives a path to recovery.
+// If the file exists, try to secure its perms before opening
+func tryRemediateFilePermissions(f *os.File, expectedMode os.FileMode) {
+	_, err := f.Stat()
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logger.Warnf("could not stat %v: %v", f.Name(), err)
+		}
+		return
+	}
+
+	if chmodErr := f.Chmod(expectedMode); chmodErr == nil {
+		logger.Infof("Set existing file %v to %04o permissions", f.Name(), expectedMode)
+	} else {
+		logger.Warnf("could not force %04o on existing file %v: %v", expectedMode, f.Name(), chmodErr)
+	}
 }
 
 func ensureFilePermissions(f *os.File, expectedMode os.FileMode) error {
