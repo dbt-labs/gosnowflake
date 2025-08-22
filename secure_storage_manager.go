@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	leaseTTL              = 10 * time.Second
+	leaseTTL              = 30 * time.Second
 	leaseOperationTimeout = 60 * time.Second
 
 	credCacheDirEnv   = "SF_TEMPORARY_CREDENTIAL_CACHE_DIR"
