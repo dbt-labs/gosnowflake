@@ -11,17 +11,58 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	leaseTTL              = 30 * time.Second
-	leaseOperationTimeout = 60 * time.Second
+	// accessed through getters that provide an override hook, do not use directly
+	_defaultLeaseTTL              = 30 * time.Second
+	_defaultLeaseOperationTimeout = 90 * time.Second
 
 	credCacheDirEnv   = "SF_TEMPORARY_CREDENTIAL_CACHE_DIR"
 	credLeaseFileName = "credential_cache.lease"
 	credCacheFileName = "credential_cache_v1.json"
 )
+
+// --- EvalOnce hook to configure lease semantics ------------------------
+
+var (
+	_cfgOnce         sync.Once
+	_overrideTTL     atomic.Value // stores time.Duration
+	_overrideTimeout atomic.Value // ditto
+)
+
+// Call once per process. Ignore 0 values and keep defaults
+func ConfigureLeaseOnce(ttl, timeout time.Duration) {
+	_cfgOnce.Do(func() {
+		if ttl > 0 {
+			_overrideTTL.Store(ttl)
+		}
+		if timeout > 0 {
+			_overrideTimeout.Store(timeout)
+			if fb, ok := credentialsStorage.(*fileBasedSecureStorageManager); ok && fb.leaseHandler != nil {
+				fb.leaseHandler.SetTimeout(timeout)
+			}
+		}
+	})
+}
+
+func leaseTTL() time.Duration {
+	if v := _overrideTTL.Load(); v != nil {
+		return v.(time.Duration)
+	}
+	return _defaultLeaseTTL
+}
+
+func leaseOperationTimeout() time.Duration {
+	if v := _overrideTimeout.Load(); v != nil {
+		return v.(time.Duration)
+	}
+	return _defaultLeaseOperationTimeout
+}
+
+// --- CacheDir resolution ------------------------
 
 type cacheDirConf struct {
 	envVar       string
@@ -95,7 +136,7 @@ func newFileBasedSecureStorageManager() (*fileBasedSecureStorageManager, error) 
 	if err != nil {
 		return nil, err
 	}
-	leaseHandler, err := NewLeaseHandler(filepath.Join(credDirPath, credLeaseFileName), leaseOperationTimeout)
+	leaseHandler, err := NewLeaseHandler(filepath.Join(credDirPath, credLeaseFileName), leaseOperationTimeout())
 	if err != nil {
 		return nil, err
 	}
@@ -170,11 +211,11 @@ func (ssm *fileBasedSecureStorageManager) getTokens(data map[string]any) map[str
 }
 
 func (ssm *fileBasedSecureStorageManager) acquireLease() (*Lease, error) {
-	return ssm.leaseHandler.Acquire(leaseTTL)
+	return ssm.leaseHandler.Acquire(leaseTTL())
 }
 
 func (ssm *fileBasedSecureStorageManager) withCacheFile(lease *Lease, action func(*os.File) error) error {
-	err := lease.Renew(leaseTTL / 2)
+	err := lease.Renew(leaseTTL() / 2)
 	if err != nil {
 		logger.Warnf("Unable to lease cache. %v", err)
 		return err
