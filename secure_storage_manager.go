@@ -48,6 +48,9 @@ func credCacheDirPath() (string, error) {
 	case "darwin":
 		return buildCredCacheDirPath(defaultMacCacheDirConf)
 	case "windows":
+		if dir := os.Getenv(credCacheDirEnv); dir != "" {
+			return ensureCacheDir(dir)
+		}
 		path, err := getLocalAppDataPath()
 		if err != nil {
 			return "", fmt.Errorf("failed to get Local/AppData folder: %v", err)
