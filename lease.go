@@ -26,8 +26,6 @@ const (
 	DefaultLeaseOperationTimeout = 30 * time.Second
 )
 
-type LeaseParams struct{ TTL, Timeout time.Duration }
-
 // Leases [1] are acquired from a shared `LeaseHandler` instance.
 //
 // [1] https://en.wikipedia.org/wiki/Lease_(computer_science)
