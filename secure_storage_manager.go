@@ -33,7 +33,10 @@ var (
 	_overrideTimeout atomic.Value // ditto
 )
 
-// Call once per process. Ignore 0 values and keep defaults
+// Call once per process.
+//
+// Ignore 0 values and keep defaults
+// Propogate changes to singleton credentialsStorage's LeaseHandler
 func ConfigureLeaseOnce(ttl, timeout time.Duration) {
 	_cfgOnce.Do(func() {
 		if ttl > 0 {
@@ -41,6 +44,8 @@ func ConfigureLeaseOnce(ttl, timeout time.Duration) {
 		}
 		if timeout > 0 {
 			_overrideTimeout.Store(timeout)
+			// warn: will fail if of other type but this is not dbt's use
+			// of the api
 			if fb, ok := credentialsStorage.(*fileBasedSecureStorageManager); ok && fb.leaseHandler != nil {
 				fb.leaseHandler.SetTimeout(timeout)
 			}

@@ -64,9 +64,9 @@ func (lease *Lease) Release() error {
 //
 // [1] https://en.wikipedia.org/wiki/Lease_(computer_science)
 type LeaseHandler struct {
-	path         string // absolute path to the lease file
-	dir          string // directory where the lease file is stored
-	timeoutNanos int64  // atomic; how long to keep trying to acquire or renew a lease
+	path          string // absolute path to the lease file
+	dir           string // directory where the lease file is stored
+	timeoutMillis int32  // atomic; how long to keep trying to acquire or renew a lease
 }
 
 func NewLeaseHandler(path string, timeout time.Duration) (*LeaseHandler, error) {
@@ -76,23 +76,26 @@ func NewLeaseHandler(path string, timeout time.Duration) (*LeaseHandler, error) 
 	}
 	dir := filepath.Dir(abspath)
 	h := &LeaseHandler{path: abspath, dir: dir}
-	h.SetTimeout(timeout) // normalize + store atomically
+	h.SetTimeout(timeout)
 	return h, nil
 }
 
+// Normalize timeout to atomic-friendly i32 and store atomically
+// Clamp to prevent wraparound. Truncate to ms.
 func (l *LeaseHandler) SetTimeout(d time.Duration) {
 	if d < MinLeaseOperationTimeout {
 		d = MinLeaseOperationTimeout
 	}
-	atomic.StoreInt64(&l.timeoutNanos, int64(d))
+	ms := d.Milliseconds()
+	if ms > math.MaxInt32 {
+		ms = math.MaxInt32
+	}
+	atomic.StoreInt32(&l.timeoutMillis, int32(ms))
 }
 
 func (l *LeaseHandler) getTimeout() time.Duration {
-	d := time.Duration(atomic.LoadInt64(&l.timeoutNanos))
-	if d < MinLeaseOperationTimeout {
-		d = MinLeaseOperationTimeout
-	}
-	return d
+	ms := atomic.LoadInt32(&l.timeoutMillis)
+	return time.Duration(ms) * time.Millisecond
 }
 
 func randomLeaseId() (string, error) {
