@@ -340,7 +340,8 @@ func doAuthenticateByExternalBrowser(
 func waitForSamlResponse(ctx context.Context, lease *Lease, l net.Listener, application string) (string, error) {
 	encodedChan := make(chan string, 1)
 	errChan := make(chan error, 1)
-	ticker := time.NewTicker(leaseTTL / 2)
+	ttl := leaseTTL()
+	ticker := time.NewTicker(ttl / 2)
 
 	go func() {
 		conn, err := l.Accept()
@@ -399,7 +400,7 @@ func waitForSamlResponse(ctx context.Context, lease *Lease, l net.Listener, appl
 	for {
 		select {
 		case <-ticker.C:
-			lease.Renew(leaseTTL)
+			lease.Renew(ttl)
 		case s := <-encodedChan:
 			ticker.Stop()
 			return s, nil
