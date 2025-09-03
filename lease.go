@@ -66,9 +66,9 @@ func (lease *Lease) Release() error {
 //
 // [1] https://en.wikipedia.org/wiki/Lease_(computer_science)
 type LeaseHandler struct {
-	path    string        // absolute path to the lease file
-	dir     string        // directory where the lease file is stored
-	timeoutNanos int64    // atomic; how long to keep trying to acquire or renew a lease
+	path         string // absolute path to the lease file
+	dir          string // directory where the lease file is stored
+	timeoutNanos int64  // atomic; how long to keep trying to acquire or renew a lease
 }
 
 func NewLeaseHandler(path string, timeout time.Duration) (*LeaseHandler, error) {
@@ -77,24 +77,24 @@ func NewLeaseHandler(path string, timeout time.Duration) (*LeaseHandler, error) 
 		return nil, fmt.Errorf("lease: %w", err)
 	}
 	dir := filepath.Dir(abspath)
-	    h := &LeaseHandler{path: abspath, dir: dir}
-	    h.SetTimeout(timeout) // normalize + store atomically
-	    return h, nil
+	h := &LeaseHandler{path: abspath, dir: dir}
+	h.SetTimeout(timeout) // normalize + store atomically
+	return h, nil
 }
 
 func (l *LeaseHandler) SetTimeout(d time.Duration) {
-    if d < MinLeaseOperationTimeout {
-        d = MinLeaseOperationTimeout
-    }
-    atomic.StoreInt64(&l.timeoutNanos, int64(d))
+	if d < MinLeaseOperationTimeout {
+		d = MinLeaseOperationTimeout
+	}
+	atomic.StoreInt64(&l.timeoutNanos, int64(d))
 }
 
 func (l *LeaseHandler) getTimeout() time.Duration {
-    d := time.Duration(atomic.LoadInt64(&l.timeoutNanos))
-    if d < MinLeaseOperationTimeout {
-        d = MinLeaseOperationTimeout
-    }
-    return d
+	d := time.Duration(atomic.LoadInt64(&l.timeoutNanos))
+	if d < MinLeaseOperationTimeout {
+		d = MinLeaseOperationTimeout
+	}
+	return d
 }
 
 func randomLeaseId() (string, error) {
@@ -270,7 +270,7 @@ func (l *LeaseHandler) Acquire(ttl time.Duration) (*Lease, error) {
 
 	base := time.Duration(0)
 	m := gracePeriod
-        deadline := time.Now().Add(l.getTimeout())
+	deadline := time.Now().Add(l.getTimeout())
 	for time.Now().Before(deadline) {
 		data, err := l.read(base, m, min(deadline.Sub(time.Now())/2, maxPollInterval))
 		base, m = nextWait(base, m)
@@ -314,7 +314,7 @@ func (l *LeaseHandler) renew(leaseId *string, ttl time.Duration, currentExpiry t
 
 	base := time.Duration(0)
 	m := time.Duration(0)
-        deadline := time.Now().Add(l.getTimeout())
+	deadline := time.Now().Add(l.getTimeout())
 	for time.Now().Before(deadline) {
 		wait(base, m, min(deadline.Sub(time.Now())/2, maxPollInterval))
 		base, m = nextWait(base, m)
@@ -340,7 +340,7 @@ func (l *LeaseHandler) renew(leaseId *string, ttl time.Duration, currentExpiry t
 		}
 		return currentExpiry, nil
 	}
-        return time.Time{}, fmt.Errorf("timed out trying to renew lease: %s id='%s'", l.path, *leaseId)
+	return time.Time{}, fmt.Errorf("timed out trying to renew lease: %s id='%s'", l.path, *leaseId)
 }
 
 func (handler *LeaseHandler) release(leaseId *string, currentExpiry time.Time) error {
