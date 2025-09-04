@@ -589,7 +589,7 @@ func prepareJWTToken(config *Config) (string, error) {
 
 // Quality of life features for externalbrowser
 var lastFail sync.Map // key -> time.Time (expiry)
-const extBrowserBackoffWindow = 10 * time.Second
+const extBrowserBackoffWindow = 60 * time.Second
 
 func normalizeHost(h string) string {
 	if strings.HasPrefix(h, "http://") || strings.HasPrefix(h, "https://") {
@@ -705,6 +705,15 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 			credentialsStorage.deleteCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
 			sc.cfg.IDToken = ""
 
+			// NOTE on tabstorms:
+			// We intentionally do NOT pre-gate the cached-ID-token fallback with a LoadOrStore
+			// on lastFail. This leaves a narrow race where multiple goroutines that all
+			// fail auth with a now-bad cached ID token could concurrently enter the
+			// interactive External Browser flow before any backoff marker is set.
+			// In practice this requires near-simultaneous failures across threads and is
+			// considered low probability and low impact
+
+			// reenter interactive flow
 			samlResponse, proofKey, err = authenticateByExternalBrowser(
 				sc.ctx, lease, sc.rest, sc.cfg.Authenticator.String(),
 				sc.cfg.Application, sc.cfg.Account, sc.cfg.User, sc.cfg.Password,
@@ -747,7 +756,10 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 
 		// no retry strategies saved the attempt -> record backoff + return
 		default:
-			lastFail.Store(key, time.Now().Add(extBrowserBackoffWindow))
+			// prevent unrelated auth modes from poisoning the EB backoff
+			if sc.cfg.Authenticator == AuthTypeExternalBrowser {
+				lastFail.Store(key, time.Now().Add(extBrowserBackoffWindow))
+			}
 			sc.cleanup()
 			return err
 		}
