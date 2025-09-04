@@ -662,7 +662,7 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 				if until := value.(time.Time); time.Now().Before(until) {
 					sc.cleanup()
 					return fmt.Errorf(
-						"External browser sign-in failed recently. Address the issue (e.g., IP restriction or identity provider error) and try again",
+						"External browser sign-in failed recently due to an unrecoverable authentication failure (e.g., IP restriction, IDP error)",
 					)
 				}
 				lastFail.Delete(key)
