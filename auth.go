@@ -589,7 +589,7 @@ func prepareJWTToken(config *Config) (string, error) {
 
 // Quality of life features for externalbrowser
 var lastFail sync.Map // key -> time.Time (expiry)
-const expBackoffWindow = 10 * time.Second
+const extBrowserBackoffWindow = 10 * time.Second
 
 func normalizeHost(h string) string {
 	if strings.HasPrefix(h, "http://") || strings.HasPrefix(h, "https://") {
@@ -603,7 +603,7 @@ func normalizeHost(h string) string {
 	return strings.ToLower(h)
 }
 
-func expBackoffKey(host, user string) string {
+func extBrowserBackoffKey(host, user string) string {
 	return normalizeHost(host) + "|" + strings.ToUpper(user)
 }
 
@@ -621,7 +621,7 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 	}
 	defer lease.Release()
 
-	key := expBackoffKey(sc.cfg.Host, sc.cfg.User)
+	key := extBrowserBackoffKey(sc.cfg.Host, sc.cfg.User)
 
 	if sc.cfg.Authenticator == AuthTypeExternalBrowser || sc.cfg.Authenticator == AuthTypeOAuthAuthorizationCode || sc.cfg.Authenticator == AuthTypeOAuthClientCredentials {
 		if isCacheSupportedGOOS(runtime.GOOS) && sc.cfg.ClientStoreTemporaryCredential == configBoolNotSet {
@@ -747,7 +747,7 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 
 		// no retry strategies saved the attempt -> record backoff + return
 		default:
-			lastFail.Store(key, time.Now().Add(expBackoffWindow))
+			lastFail.Store(key, time.Now().Add(extBrowserBackoffWindow))
 			sc.cleanup()
 			return err
 		}
