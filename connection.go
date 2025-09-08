@@ -554,6 +554,7 @@ func (sc *snowflakeConn) QueryArrowStream(ctx context.Context, query string, bin
 			JSON:         data.Data.RowSet,
 			RowSetBase64: data.Data.RowSetBase64,
 		},
+		queryID: data.Data.QueryID,
 	}, nil
 }
 
@@ -680,6 +681,7 @@ type ArrowStreamLoader interface {
 	RowTypes() []execResponseRowType
 	Location() *time.Location
 	JSONData() [][]*string
+	QueryID() string
 }
 
 type snowflakeArrowStreamChunkDownloader struct {
@@ -690,6 +692,7 @@ type snowflakeArrowStreamChunkDownloader struct {
 	ChunkHeader map[string]string
 	FuncGet     func(context.Context, *snowflakeConn, string, map[string]string, time.Duration) (*http.Response, error)
 	RowSet      rowSetType
+	queryID     string
 }
 
 func (scd *snowflakeArrowStreamChunkDownloader) Location() *time.Location {
@@ -704,6 +707,9 @@ func (scd *snowflakeArrowStreamChunkDownloader) RowTypes() []execResponseRowType
 }
 func (scd *snowflakeArrowStreamChunkDownloader) JSONData() [][]*string {
 	return scd.RowSet.JSON
+}
+func (scd *snowflakeArrowStreamChunkDownloader) QueryID() string {
+	return scd.queryID
 }
 
 // the server might have had an empty first batch, check if we can decode
