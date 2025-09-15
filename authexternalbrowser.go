@@ -451,13 +451,12 @@ type externalBrowserSamlResponseProvider struct {
 }
 
 func (e externalBrowserSamlResponseProvider) run(loginURL string) (string, error) {
-	fmt.Printf(`
-    Initiating login request in browser with your identity provider.
-    `)
+	// TODO: Figure out how to migrate logging to use context once run() includes ctx
+	logger.Info("Initiating login request in browser with your identity provider.")
 
 	if err := openBrowser(loginURL); err == nil {
 		// ---- AUTOMATIC PATH
-		// Browser successfully opened. Listener will capture the redirect.
+		// Browser successfully opened. Listener will capture the redirect downstream.
 		return "", nil
 	}
 
