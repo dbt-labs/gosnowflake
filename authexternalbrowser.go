@@ -287,7 +287,7 @@ func doAuthenticateByExternalBrowser(
 		return authenticateByExternalBrowserResult{nil, nil, err}
 	}
 
-	fmt.Printf("\tInitiating login request in browser with your identity provider.")
+	logger.WithContext(ctx).Info("Initiating login request in browser with your identity provider.")
 	if err := openBrowser(loginURL); err == nil {
 		// ---- AUTOMATIC PATH
 		// Block until the browser redirect hits the listener.
