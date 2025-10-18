@@ -227,7 +227,6 @@ func authenticateByExternalBrowser(
 	application string,
 	account string,
 	user string,
-	password string,
 	externalBrowserTimeout time.Duration,
 	disableConsoleLogin ConfigBool,
 ) ([]byte, []byte, error) {
@@ -235,7 +234,7 @@ func authenticateByExternalBrowser(
 	go GoroutineWrapper(
 		ctx,
 		func() {
-			resultChan <- doAuthenticateByExternalBrowser(ctx, lease, sr, authenticator, application, account, user, password, disableConsoleLogin)
+			resultChan <- doAuthenticateByExternalBrowser(ctx, lease, sr, authenticator, application, account, user, disableConsoleLogin)
 		},
 	)
 	select {
