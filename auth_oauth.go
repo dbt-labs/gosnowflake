@@ -123,8 +123,12 @@ func (oauthClient *oauthClient) authenticateByOAuthAuthorizationCode(lease *Leas
 	case result := <-resultChan:
 		if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
 			logger.Debug("saving oauth access token in cache")
-			credentialsStorage.setCredential(lease, oauthClient.accessTokenSpec(), result.accessToken)
-			credentialsStorage.setCredential(lease, oauthClient.refreshTokenSpec(), result.refreshToken)
+			// Acquire short-lived lease for write
+			if writeLease, err := credentialsStorage.acquireLease(); err == nil {
+				credentialsStorage.setCredential(writeLease, oauthClient.accessTokenSpec(), result.accessToken)
+				credentialsStorage.setCredential(writeLease, oauthClient.refreshTokenSpec(), result.refreshToken)
+				writeLease.Release()
+			}
 		}
 		return result.accessToken, result.err
 	}
@@ -370,7 +374,11 @@ func (oauthClient *oauthClient) authenticateByOAuthClientCredentials(lease *Leas
 		return "", err
 	}
 	if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
-		credentialsStorage.setCredential(lease, accessTokenSpec, token.AccessToken)
+		// Acquire short-lived lease for write
+		if writeLease, leaseErr := credentialsStorage.acquireLease(); leaseErr == nil {
+			credentialsStorage.setCredential(writeLease, accessTokenSpec, token.AccessToken)
+			writeLease.Release()
+		}
 	}
 	return token.AccessToken, nil
 }
@@ -422,7 +430,14 @@ func (oauthClient *oauthClient) refreshToken(lease *Lease) error {
 		if err != nil {
 			return err
 		}
-		credentialsStorage.deleteCredential(lease, refreshTokenSpec)
+		// Acquire short-lived lease for delete
+		// Only delete if the cached credential matches what we tried to use (avoid race with concurrent auth)
+		if deleteLease, leaseErr := credentialsStorage.acquireLease(); leaseErr == nil {
+			if cached, _ := credentialsStorage.getCredential(deleteLease, refreshTokenSpec); cached == refreshToken {
+				credentialsStorage.deleteCredential(deleteLease, refreshTokenSpec)
+			}
+			deleteLease.Release()
+		}
 		return errors.New(string(respBody))
 	}
 	var tokenResponse tokenExchangeResponseBody
@@ -430,9 +445,13 @@ func (oauthClient *oauthClient) refreshToken(lease *Lease) error {
 		return err
 	}
 	accessTokenSpec := oauthClient.accessTokenSpec()
-	credentialsStorage.setCredential(lease, accessTokenSpec, tokenResponse.AccessToken)
-	if tokenResponse.RefreshToken != "" {
-		credentialsStorage.setCredential(lease, refreshTokenSpec, tokenResponse.RefreshToken)
+	// Acquire short-lived lease for writes
+	if writeLease, leaseErr := credentialsStorage.acquireLease(); leaseErr == nil {
+		credentialsStorage.setCredential(writeLease, accessTokenSpec, tokenResponse.AccessToken)
+		if tokenResponse.RefreshToken != "" {
+			credentialsStorage.setCredential(writeLease, refreshTokenSpec, tokenResponse.RefreshToken)
+		}
+		writeLease.Release()
 	}
 	return nil
 }

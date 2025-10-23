@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
 	"github.com/99designs/keyring"
 )
 
@@ -283,6 +284,36 @@ func (ssm *fileBasedSecureStorageManager) withCacheFile(lease *Lease, action fun
 	return action(cacheFile)
 }
 
+// readCacheFileWithoutLease reads the cache file without acquiring a lease.
+// Multiple processes can read concurrently. If we read during a write, worst
+// case we get stale data and the subsequent auth will fail and retry.
+func (ssm *fileBasedSecureStorageManager) readCacheFileWithoutLease(action func(*os.File) error) error {
+	path := ssm.credFilePath()
+
+	cacheFile, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return action(nil) // No cache file - treat as empty
+		}
+		logger.Warnf("cannot access %v. %v", path, err)
+		return err
+	}
+	defer func(file *os.File) {
+		if err := file.Close(); err != nil {
+			logger.Warnf("cannot release file descriptor for %v. %v", path, err)
+		}
+	}(cacheFile)
+
+	// Best-effort validation - don't fail read on permission issues
+	if runtime.GOOS != "windows" {
+		if err := ensureFileOwner(cacheFile); err != nil {
+			logger.Debugf("cache file owner check failed (ignoring for read): %v", err)
+		}
+	}
+
+	return action(cacheFile)
+}
+
 func (ssm *fileBasedSecureStorageManager) setCredential(lease *Lease, tokenSpec *secureTokenSpec, value string) error {
 	// Skip caching when the MFA token is empty.
 	// This can occur in successful auth scenarios where:
@@ -398,6 +429,36 @@ func (ssm *fileBasedSecureStorageManager) getCredential(lease *Lease, tokenSpec 
 	}
 
 	ret := ""
+
+	// Lock-free read path when no lease provided
+	if lease == nil {
+		err = ssm.readCacheFileWithoutLease(func(cacheFile *os.File) error {
+			if cacheFile == nil {
+				return nil // No cache file exists
+			}
+
+			credCache, err := ssm.readTemporaryCacheFile(cacheFile)
+			if err != nil {
+				logger.Warnf("Error while reading cache file. %v", err)
+				return err
+			}
+			cred, ok := ssm.getTokens(credCache)[credentialsKey]
+			if !ok {
+				return nil
+			}
+
+			credStr, ok := cred.(string)
+			if !ok {
+				return nil
+			}
+
+			ret = credStr
+			return nil
+		})
+		return ret, err
+	}
+
+	// Lease-based path for write-then-read scenarios
 	err = ssm.withCacheFile(lease, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {

@@ -386,7 +386,10 @@ func waitForSamlResponse(ctx context.Context, lease *Lease, l net.Listener, appl
 	for {
 		select {
 		case <-ticker.C:
-			lease.Renew(ttl)
+			// Renew lease if we have one
+			if lease != nil {
+				lease.Renew(ttl)
+			}
 		case s := <-encodedChan:
 			ticker.Stop()
 			return s, nil
