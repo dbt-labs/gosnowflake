@@ -566,6 +566,7 @@ func (sc *snowflakeConn) QueryArrowStream(ctx context.Context, query string, bin
 			RowSetBase64: data.Data.RowSetBase64,
 		},
 		resultIDs: resultIDs,
+		queryID:   data.Data.QueryID,
 	}
 	// if multistatement is used, we need to set the first result set to actual result set, not the aggregated response
 	if scd.hasNextResultSet() {
@@ -717,6 +718,7 @@ type ArrowStreamLoader interface {
 	// JSONData returns the data if JSON was returned instead of Arrow.
 	// If multistatement is used, this is the data for the current result set.
 	JSONData() [][]*string
+	QueryID() string
 }
 
 type snowflakeArrowStreamChunkDownloader struct {
@@ -728,6 +730,7 @@ type snowflakeArrowStreamChunkDownloader struct {
 	FuncGet     func(context.Context, *snowflakeConn, string, map[string]string, time.Duration) (*http.Response, error)
 	RowSet      rowSetType
 	resultIDs   []string
+	queryID     string
 }
 
 func (scd *snowflakeArrowStreamChunkDownloader) Location() *time.Location {
@@ -742,6 +745,9 @@ func (scd *snowflakeArrowStreamChunkDownloader) RowTypes() []execResponseRowType
 }
 func (scd *snowflakeArrowStreamChunkDownloader) JSONData() [][]*string {
 	return scd.RowSet.JSON
+}
+func (scd *snowflakeArrowStreamChunkDownloader) QueryID() string {
+	return scd.queryID
 }
 
 // the server might have had an empty first batch, check if we can decode
