@@ -115,63 +115,11 @@ type secureStorageManager interface {
 	acquireLease() (*Lease, error)
 	setCredential(lease *Lease, tokenSpec *secureTokenSpec, value string) error
 	getCredential(lease *Lease, tokenSpec *secureTokenSpec) (string, error)
+	getCredentialRelaxed(optionalLease *Lease, tokenSpec *secureTokenSpec) (string, error)
 	deleteCredential(lease *Lease, tokenSpec *secureTokenSpec) error
 }
 
 var credentialsStorage = newSecureStorageManager()
-
-// Helper fast-paths to minimize lease contention for common operations.
-// These acquire a lease only if needed.
-
-// getCredentialFast attempts an in-memory read first (if available),
-// otherwise acquires a lease to consult the persistent cache.
-func getCredentialFast(tokenSpec *secureTokenSpec) (string, error) {
-	// Try in-memory if file-based storage
-	if fb, ok := credentialsStorage.(*fileBasedSecureStorageManager); ok {
-		key, err := tokenSpec.buildKey()
-		if err != nil {
-			return "", err
-		}
-		fb.memMu.RLock()
-		if v, ok := fb.mem[key]; ok {
-			fb.memMu.RUnlock()
-			return v, nil
-		}
-		fb.memMu.RUnlock()
-	}
-
-	// Miss: acquire lease and consult backing store
-	lease, err := credentialsStorage.acquireLease()
-	if err != nil {
-		return "", err
-	}
-	if lease != nil {
-		defer lease.Release()
-	}
-	return credentialsStorage.getCredential(lease, tokenSpec)
-}
-
-func setCredentialWithLease(tokenSpec *secureTokenSpec, value string) error {
-	lease, err := credentialsStorage.acquireLease()
-	if err != nil {
-		return err
-	}
-	if lease != nil {
-		defer lease.Release()
-	}
-	return credentialsStorage.setCredential(lease, tokenSpec, value)
-}
-
-func deleteCredentialWithLease(tokenSpec *secureTokenSpec) error {
-	lease, err := credentialsStorage.acquireLease()
-	if err != nil {
-		return err
-	}
-	if lease != nil {
-		defer lease.Release()
-	}
-	return credentialsStorage.deleteCredential(lease, tokenSpec)
-}
 
 func newSecureStorageManager() secureStorageManager {
 	var ssm secureStorageManager
@@ -365,7 +313,17 @@ func (ssm *fileBasedSecureStorageManager) setCredential(lease *Lease, tokenSpec 
 		ssm.memMu.Unlock()
 	}
 
-	return ssm.withCacheFile(lease, func(cacheFile *os.File) error {
+	// Acquire lease if not provided
+	var actualLease = lease
+	if lease == nil {
+		actualLease, err = ssm.acquireLease()
+		if err != nil {
+			return err
+		}
+		defer actualLease.Release()
+	}
+
+	return ssm.withCacheFile(actualLease, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file: %v", err)
@@ -457,6 +415,37 @@ func (ssm *fileBasedSecureStorageManager) unlockFile() {
 	}
 }
 
+// Attempts an in-memory read first,
+// Otherwise consults the persisted cache with a lease
+func (ssm *fileBasedSecureStorageManager) getCredentialRelaxed(optionalLease *Lease, tokenSpec *secureTokenSpec) (string, error) {
+	key, err := tokenSpec.buildKey()
+	if err != nil {
+		return "", err
+	}
+
+	ssm.memMu.RLock()
+	if v, ok := ssm.mem[key]; ok {
+		ssm.memMu.RUnlock()
+		return v, nil
+	}
+	ssm.memMu.RUnlock()
+
+	// Miss: consult backing store
+	var lease = optionalLease
+	if optionalLease == nil {
+		lease, err = ssm.acquireLease()
+		if err != nil {
+			return "", err
+		}
+	}
+
+	if lease != nil {
+		defer lease.Release()
+	}
+
+	return ssm.getCredential(lease, tokenSpec)
+}
+
 func (ssm *fileBasedSecureStorageManager) getCredential(lease *Lease, tokenSpec *secureTokenSpec) (string, error) {
 	credentialsKey, err := tokenSpec.buildKey()
 	if err != nil {
@@ -471,8 +460,18 @@ func (ssm *fileBasedSecureStorageManager) getCredential(lease *Lease, tokenSpec 
 	}
 	ssm.memMu.RUnlock()
 
+	// Acquire lease if not provided
+	var actualLease = lease
+	if lease == nil {
+		actualLease, err = ssm.acquireLease()
+		if err != nil {
+			return "", err
+		}
+		defer actualLease.Release()
+	}
+
 	ret := ""
-	err = ssm.withCacheFile(lease, func(cacheFile *os.File) error {
+	err = ssm.withCacheFile(actualLease, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
@@ -586,7 +585,17 @@ func (ssm *fileBasedSecureStorageManager) deleteCredential(lease *Lease, tokenSp
 	delete(ssm.mem, credentialsKey)
 	ssm.memMu.Unlock()
 
-	return ssm.withCacheFile(lease, func(cacheFile *os.File) error {
+	// Acquire lease if not provided
+	var actualLease = lease
+	if lease == nil {
+		actualLease, err = ssm.acquireLease()
+		if err != nil {
+			return err
+		}
+		defer actualLease.Release()
+	}
+
+	return ssm.withCacheFile(actualLease, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
@@ -756,6 +765,10 @@ func (ssm *noopSecureStorageManager) setCredential(_ *Lease, _ *secureTokenSpec,
 
 func (ssm *noopSecureStorageManager) getCredential(_ *Lease, _ *secureTokenSpec) (string, error) {
 	return "", nil // no-op implementation for secure storage manager
+}
+
+func (ssm *noopSecureStorageManager) getCredentialRelaxed(_ *Lease, _ *secureTokenSpec) (string, error) {
+	return "", nil
 }
 
 func (ssm *noopSecureStorageManager) deleteCredential(_ *Lease, _ *secureTokenSpec) error {
