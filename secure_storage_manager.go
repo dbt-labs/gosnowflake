@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
 	"github.com/99designs/keyring"
 )
 
@@ -119,6 +120,59 @@ type secureStorageManager interface {
 
 var credentialsStorage = newSecureStorageManager()
 
+// Helper fast-paths to minimize lease contention for common operations.
+// These acquire a lease only if needed.
+
+// getCredentialFast attempts an in-memory read first (if available),
+// otherwise acquires a lease to consult the persistent cache.
+func getCredentialFast(tokenSpec *secureTokenSpec) (string, error) {
+	// Try in-memory if file-based storage
+	if fb, ok := credentialsStorage.(*fileBasedSecureStorageManager); ok {
+		key, err := tokenSpec.buildKey()
+		if err != nil {
+			return "", err
+		}
+		fb.memMu.RLock()
+		if v, ok := fb.mem[key]; ok {
+			fb.memMu.RUnlock()
+			return v, nil
+		}
+		fb.memMu.RUnlock()
+	}
+
+	// Miss: acquire lease and consult backing store
+	lease, err := credentialsStorage.acquireLease()
+	if err != nil {
+		return "", err
+	}
+	if lease != nil {
+		defer lease.Release()
+	}
+	return credentialsStorage.getCredential(lease, tokenSpec)
+}
+
+func setCredentialWithLease(tokenSpec *secureTokenSpec, value string) error {
+	lease, err := credentialsStorage.acquireLease()
+	if err != nil {
+		return err
+	}
+	if lease != nil {
+		defer lease.Release()
+	}
+	return credentialsStorage.setCredential(lease, tokenSpec, value)
+}
+
+func deleteCredentialWithLease(tokenSpec *secureTokenSpec) error {
+	lease, err := credentialsStorage.acquireLease()
+	if err != nil {
+		return err
+	}
+	if lease != nil {
+		defer lease.Release()
+	}
+	return credentialsStorage.deleteCredential(lease, tokenSpec)
+}
+
 func newSecureStorageManager() secureStorageManager {
 	var ssm secureStorageManager
 	var err error
@@ -139,6 +193,9 @@ func newSecureStorageManager() secureStorageManager {
 type fileBasedSecureStorageManager struct {
 	credDirPath  string
 	leaseHandler *LeaseHandler
+	// in-memory fast path cache to reduce file lock contention within a process
+	memMu sync.RWMutex
+	mem   map[string]string
 }
 
 func newFileBasedSecureStorageManager() (*fileBasedSecureStorageManager, error) {
@@ -153,6 +210,7 @@ func newFileBasedSecureStorageManager() (*fileBasedSecureStorageManager, error) 
 	ssm := &fileBasedSecureStorageManager{
 		credDirPath:  credDirPath,
 		leaseHandler: leaseHandler,
+		mem:          make(map[string]string),
 	}
 	return ssm, nil
 }
@@ -299,6 +357,14 @@ func (ssm *fileBasedSecureStorageManager) setCredential(lease *Lease, tokenSpec 
 		return err
 	}
 
+	// Update in-memory cache fast path first to satisfy concurrent readers
+	// in this process without hitting the filesystem.
+	if credentialsKey != "" && value != "" {
+		ssm.memMu.Lock()
+		ssm.mem[credentialsKey] = value
+		ssm.memMu.Unlock()
+	}
+
 	return ssm.withCacheFile(lease, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
@@ -397,6 +463,14 @@ func (ssm *fileBasedSecureStorageManager) getCredential(lease *Lease, tokenSpec 
 		return "", err
 	}
 
+	// Fast path: serve from in-memory cache if present
+	ssm.memMu.RLock()
+	if v, ok := ssm.mem[credentialsKey]; ok {
+		ssm.memMu.RUnlock()
+		return v, nil
+	}
+	ssm.memMu.RUnlock()
+
 	ret := ""
 	err = ssm.withCacheFile(lease, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
@@ -415,6 +489,10 @@ func (ssm *fileBasedSecureStorageManager) getCredential(lease *Lease, tokenSpec 
 		}
 
 		ret = credStr
+		// Populate in-memory cache for subsequent readers
+		ssm.memMu.Lock()
+		ssm.mem[credentialsKey] = credStr
+		ssm.memMu.Unlock()
 		return nil
 	})
 	return ret, err
@@ -502,6 +580,11 @@ func (ssm *fileBasedSecureStorageManager) deleteCredential(lease *Lease, tokenSp
 		logger.Warn(err)
 		return err
 	}
+
+	// Remove from in-memory cache first
+	ssm.memMu.Lock()
+	delete(ssm.mem, credentialsKey)
+	ssm.memMu.Unlock()
 
 	return ssm.withCacheFile(lease, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)

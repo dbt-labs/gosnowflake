@@ -91,16 +91,16 @@ type oauthBrowserResult struct {
 }
 
 func (oauthClient *oauthClient) authenticateByOAuthAuthorizationCode(lease *Lease) (string, error) {
-	accessTokenSpec := oauthClient.accessTokenSpec()
-	if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
-		if accessToken, err := credentialsStorage.getCredential(lease, accessTokenSpec); accessToken != "" {
-			logger.Debugf("Access token retrieved from cache: %v", err)
-			return accessToken, nil
-		}
-		if refreshToken, _ := credentialsStorage.getCredential(lease, oauthClient.refreshTokenSpec()); refreshToken != "" {
-			return "", &SnowflakeError{Number: ErrMissingAccessATokenButRefreshTokenPresent}
-		}
-	}
+    accessTokenSpec := oauthClient.accessTokenSpec()
+    if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
+        if accessToken, err := getCredentialFast(accessTokenSpec); accessToken != "" {
+            logger.Debugf("Access token retrieved from cache: %v", err)
+            return accessToken, nil
+        }
+        if refreshToken, _ := getCredentialFast(oauthClient.refreshTokenSpec()); refreshToken != "" {
+            return "", &SnowflakeError{Number: ErrMissingAccessATokenButRefreshTokenPresent}
+        }
+    }
 	logger.Debugf("Access token not present in cache, running full auth code flow")
 
 	resultChan := make(chan oauthBrowserResult, 1)
@@ -121,13 +121,13 @@ func (oauthClient *oauthClient) authenticateByOAuthAuthorizationCode(lease *Leas
 	case <-time.After(oauthClient.cfg.ExternalBrowserTimeout):
 		return "", errors.New("authentication via browser timed out")
 	case result := <-resultChan:
-		if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
-			logger.Debug("saving oauth access token in cache")
-			credentialsStorage.setCredential(lease, oauthClient.accessTokenSpec(), result.accessToken)
-			credentialsStorage.setCredential(lease, oauthClient.refreshTokenSpec(), result.refreshToken)
-		}
-		return result.accessToken, result.err
-	}
+        if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
+            logger.Debug("saving oauth access token in cache")
+            _ = setCredentialWithLease(oauthClient.accessTokenSpec(), result.accessToken)
+            _ = setCredentialWithLease(oauthClient.refreshTokenSpec(), result.refreshToken)
+        }
+        return result.accessToken, result.err
+    }
 }
 
 func (oauthClient *oauthClient) doAuthenticateByOAuthAuthorizationCode(tcpListener *net.TCPListener, callbackPort int) oauthBrowserResult {
@@ -353,14 +353,14 @@ func (provider *browserBasedAuthorizationCodeProvider) createCodeVerifier() stri
 
 func (oauthClient *oauthClient) authenticateByOAuthClientCredentials(lease *Lease) (string, error) {
 	accessTokenSpec := oauthClient.accessTokenSpec()
-	if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
-		if accessToken, err := credentialsStorage.getCredential(lease, accessTokenSpec); accessToken != "" {
-			if err != nil {
-				return "", fmt.Errorf("error retrieving access token from cache: %w", err)
-			}
-			return accessToken, nil
-		}
-	}
+    if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
+        if accessToken, err := getCredentialFast(accessTokenSpec); accessToken != "" {
+            if err != nil {
+                return "", fmt.Errorf("error retrieving access token from cache: %w", err)
+            }
+            return accessToken, nil
+        }
+    }
 	oauth2Cfg, err := oauthClient.buildClientCredentialsConfig()
 	if err != nil {
 		return "", err
@@ -369,10 +369,10 @@ func (oauthClient *oauthClient) authenticateByOAuthClientCredentials(lease *Leas
 	if err != nil {
 		return "", err
 	}
-	if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
-		credentialsStorage.setCredential(lease, accessTokenSpec, token.AccessToken)
-	}
-	return token.AccessToken, nil
+    if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
+        _ = setCredentialWithLease(accessTokenSpec, token.AccessToken)
+    }
+    return token.AccessToken, nil
 }
 
 func (oauthClient *oauthClient) buildClientCredentialsConfig() (*clientcredentials.Config, error) {
@@ -388,16 +388,16 @@ func (oauthClient *oauthClient) buildClientCredentialsConfig() (*clientcredentia
 }
 
 func (oauthClient *oauthClient) refreshToken(lease *Lease) error {
-	if oauthClient.cfg.ClientStoreTemporaryCredential != ConfigBoolTrue {
-		logger.Debug("credentials storage is disabled, cannot use refresh tokens")
-		return nil
-	}
-	refreshTokenSpec := newOAuthRefreshTokenSpec(oauthClient.cfg.OauthTokenRequestURL, oauthClient.cfg.User)
-	refreshToken, _ := credentialsStorage.getCredential(lease, refreshTokenSpec)
-	if refreshToken == "" {
-		logger.Debug("no refresh token in cache, full flow must be run")
-		return nil
-	}
+    if oauthClient.cfg.ClientStoreTemporaryCredential != ConfigBoolTrue {
+        logger.Debug("credentials storage is disabled, cannot use refresh tokens")
+        return nil
+    }
+    refreshTokenSpec := newOAuthRefreshTokenSpec(oauthClient.cfg.OauthTokenRequestURL, oauthClient.cfg.User)
+    refreshToken, _ := getCredentialFast(refreshTokenSpec)
+    if refreshToken == "" {
+        logger.Debug("no refresh token in cache, full flow must be run")
+        return nil
+    }
 	body := url.Values{}
 	body.Add("grant_type", "refresh_token")
 	body.Add("refresh_token", refreshToken)
@@ -417,24 +417,24 @@ func (oauthClient *oauthClient) refreshToken(lease *Lease) error {
 			logger.Warnf("error while closing response body for %v. %v", req.URL, err)
 		}
 	}()
-	if resp.StatusCode != 200 {
-		respBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return err
-		}
-		credentialsStorage.deleteCredential(lease, refreshTokenSpec)
-		return errors.New(string(respBody))
-	}
+    if resp.StatusCode != 200 {
+        respBody, err := io.ReadAll(resp.Body)
+        if err != nil {
+            return err
+        }
+        _ = deleteCredentialWithLease(refreshTokenSpec)
+        return errors.New(string(respBody))
+    }
 	var tokenResponse tokenExchangeResponseBody
 	if err = json.NewDecoder(resp.Body).Decode(&tokenResponse); err != nil {
 		return err
 	}
-	accessTokenSpec := oauthClient.accessTokenSpec()
-	credentialsStorage.setCredential(lease, accessTokenSpec, tokenResponse.AccessToken)
-	if tokenResponse.RefreshToken != "" {
-		credentialsStorage.setCredential(lease, refreshTokenSpec, tokenResponse.RefreshToken)
-	}
-	return nil
+    accessTokenSpec := oauthClient.accessTokenSpec()
+    _ = setCredentialWithLease(accessTokenSpec, tokenResponse.AccessToken)
+    if tokenResponse.RefreshToken != "" {
+        _ = setCredentialWithLease(refreshTokenSpec, tokenResponse.RefreshToken)
+    }
+    return nil
 }
 
 type tokenExchangeResponseBody struct {

@@ -430,15 +430,15 @@ func authenticate(
 	if !respd.Success {
 		logger.WithContext(ctx).Errorln("Authentication FAILED")
 		sc.rest.TokenAccessor.SetTokens("", "", -1)
-		if sessionParameters[clientRequestMfaToken] == true {
-			credentialsStorage.deleteCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
-		}
-		if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator == AuthTypeExternalBrowser {
-			credentialsStorage.deleteCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
-		}
-		if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator.isOauthNativeFlow() {
-			credentialsStorage.deleteCredential(lease, newOAuthAccessTokenSpec(sc.cfg.OauthTokenRequestURL, sc.cfg.User))
-		}
+        if sessionParameters[clientRequestMfaToken] == true {
+            _ = deleteCredentialWithLease(newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
+        }
+        if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator == AuthTypeExternalBrowser {
+            _ = deleteCredentialWithLease(newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+        }
+        if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator.isOauthNativeFlow() {
+            _ = deleteCredentialWithLease(newOAuthAccessTokenSpec(sc.cfg.OauthTokenRequestURL, sc.cfg.User))
+        }
 		code, err := strconv.Atoi(respd.Code)
 		if err != nil {
 			return nil, err
@@ -452,19 +452,19 @@ func authenticate(
 	logger.WithContext(ctx).Info("Authentication SUCCESS")
 	sc.rest.TokenAccessor.SetTokens(respd.Data.Token, respd.Data.MasterToken, respd.Data.SessionID)
 
-	if sessionParameters[clientRequestMfaToken] == true && sc.cfg.Authenticator == AuthTypeUsernamePasswordMFA {
-		token := respd.Data.MfaToken
-		credentialsStorage.setCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User), token)
-	}
+    if sessionParameters[clientRequestMfaToken] == true && sc.cfg.Authenticator == AuthTypeUsernamePasswordMFA {
+        token := respd.Data.MfaToken
+        _ = setCredentialWithLease(newMfaTokenSpec(sc.cfg.Host, sc.cfg.User), token)
+    }
 
-	if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator == AuthTypeExternalBrowser {
-		token := respd.Data.IDToken
-		// XXX: for some reason, token is empty here some times and we
-		// don't want to clear the cache, so let's skip it if it's empty
-		if token != "" {
-			credentialsStorage.setCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User), token)
-		}
-	}
+    if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator == AuthTypeExternalBrowser {
+        token := respd.Data.IDToken
+        // XXX: for some reason, token is empty here some times and we
+        // don't want to clear the cache, so let's skip it if it's empty
+        if token != "" {
+            _ = setCredentialWithLease(newIDTokenSpec(sc.cfg.Host, sc.cfg.User), token)
+        }
+    }
 	return &respd.Data, nil
 }
 
@@ -633,13 +633,13 @@ func authenticateByAuthorizationCode(sc *snowflakeConn, lease *Lease) (string, e
 	lockKey := newOAuthAuthorizationCodeLockKey(oauthClient.tokenURL(), sc.cfg.User)
 	valueAwaiter := valueAwaitHolder.get(lockKey)
 	defer valueAwaiter.resumeOne()
-	token, err := awaitValue(valueAwaiter, func() (string, error) {
-		return credentialsStorage.getCredential(lease, newOAuthAccessTokenSpec(oauthClient.tokenURL(), sc.cfg.User))
-	}, func(s string, err error) bool {
-		return s != ""
-	}, func() string {
-		return ""
-	})
+    token, err := awaitValue(valueAwaiter, func() (string, error) {
+        return getCredentialFast(newOAuthAccessTokenSpec(oauthClient.tokenURL(), sc.cfg.User))
+    }, func(s string, err error) bool {
+        return s != ""
+    }, func() string {
+        return ""
+    })
 	if err != nil || token != "" {
 		return token, err
 	}
@@ -742,11 +742,14 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 	mfaTokenLockKey := newMfaTokenLockKey(sc.cfg.Host, sc.cfg.User)
 	idTokenLockKey := newIDTokenLockKey(sc.cfg.Host, sc.cfg.User)
 
-	lease, err := credentialsStorage.acquireLease()
-	if err != nil {
-		return err
-	}
-	defer lease.Release()
+    // Avoid acquiring the global lease up front; use fast-path lookups that
+    // consult the in-memory cache first and only acquire the lease on misses.
+    var lease *Lease
+    defer func() {
+        if lease != nil {
+            lease.Release()
+        }
+    }()
 
 	key := extBrowserBackoffKey(sc.cfg.Host, sc.cfg.User)
 
@@ -762,7 +765,7 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 				sc.cfg.IDToken, _ = awaitValue(
 					valueAwaiter,
 					func() (string, error) {
-						tok, _ := credentialsStorage.getCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+                    tok, _ := getCredentialFast(newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
 						return tok, nil
 					},
 					func(s string, err error) bool {
@@ -773,10 +776,10 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 					},
 				)
 
-			} else if sc.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
-				tok, _ := credentialsStorage.getCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
-				sc.cfg.IDToken = tok
-			}
+            } else if sc.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
+                tok, _ := getCredentialFast(newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+                sc.cfg.IDToken = tok
+            }
 			// Disable console login by default
 			if sc.cfg.DisableConsoleLogin == configBoolNotSet {
 				sc.cfg.DisableConsoleLogin = ConfigBoolTrue
@@ -793,7 +796,7 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 				sc.cfg.MfaToken, _ = awaitValue(
 					valueAwaiter,
 					func() (string, error) {
-						tok, err := credentialsStorage.getCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
+                    tok, err := getCredentialFast(newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
 						if err != nil {
 							logger.WithContext(sc.ctx).Warnf("failed to get MFA token from credential storage: %v", err)
 						}
@@ -804,13 +807,13 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 						return ""
 					},
 				)
-			} else if sc.cfg.ClientRequestMfaToken == ConfigBoolTrue {
-				tok, err := credentialsStorage.getCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
-				if err != nil {
-					logger.WithContext(sc.ctx).Warnf("failed to get MFA token from credential storage: %v", err)
-				}
-				sc.cfg.MfaToken = tok
-			}
+            } else if sc.cfg.ClientRequestMfaToken == ConfigBoolTrue {
+                tok, err := getCredentialFast(newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
+                if err != nil {
+                    logger.WithContext(sc.ctx).Warnf("failed to get MFA token from credential storage: %v", err)
+                }
+                sc.cfg.MfaToken = tok
+            }
 		}
 	}
 
@@ -829,28 +832,36 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 				lastFail.Delete(key)
 			}
 
-			samlResponse, proofKey, err = authenticateByExternalBrowser(
-				sc.ctx,
-				lease,
-				sc.rest,
-				sc.cfg.Authenticator.String(),
-				sc.cfg.Application,
-				sc.cfg.Account,
-				sc.cfg.User,
-				sc.cfg.ExternalBrowserTimeout,
-				sc.cfg.DisableConsoleLogin)
+        // External browser path requires a live lease for periodic renewals
+        if lease == nil {
+            lease, err = credentialsStorage.acquireLease()
+            if err != nil {
+                sc.cleanup()
+                return err
+            }
+        }
+        samlResponse, proofKey, err = authenticateByExternalBrowser(
+            sc.ctx,
+            lease,
+            sc.rest,
+            sc.cfg.Authenticator.String(),
+            sc.cfg.Application,
+            sc.cfg.Account,
+            sc.cfg.User,
+            sc.cfg.ExternalBrowserTimeout,
+            sc.cfg.DisableConsoleLogin)
 			if err != nil {
 				sc.cleanup()
 				return err
 			}
 		}
 	}
-	authData, err = authenticate(
-		sc.ctx,
-		lease,
-		sc,
-		samlResponse,
-		proofKey)
+    authData, err = authenticate(
+        sc.ctx,
+        lease,
+        sc,
+        samlResponse,
+        proofKey)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			sc.cleanup()
@@ -861,9 +872,9 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 
 		switch {
 		// Case 1: cached ID token failed -> clear + try one interactive refresh
-		case sc.cfg.Authenticator == AuthTypeExternalBrowser && sc.cfg.IDToken != "":
-			credentialsStorage.deleteCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
-			sc.cfg.IDToken = ""
+        case sc.cfg.Authenticator == AuthTypeExternalBrowser && sc.cfg.IDToken != "":
+            _ = deleteCredentialWithLease(newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+            sc.cfg.IDToken = ""
 
 			// NOTE on tabstorms:
 			// We intentionally do NOT pre-gate the cached-ID-token fallback with a LoadOrStore
@@ -874,11 +885,19 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 			// considered low probability and low impact
 
 			// reenter interactive flow
-			samlResponse, proofKey, err = authenticateByExternalBrowser(
-				sc.ctx, lease, sc.rest, sc.cfg.Authenticator.String(),
-				sc.cfg.Application, sc.cfg.Account, sc.cfg.User,
-				sc.cfg.ExternalBrowserTimeout, sc.cfg.DisableConsoleLogin,
-			)
+            if lease == nil {
+                lease, err = credentialsStorage.acquireLease()
+                if err != nil {
+                    // let SAML-phase failure remain retryable; do not set backoff
+                    sc.cleanup()
+                    return err
+                }
+            }
+            samlResponse, proofKey, err = authenticateByExternalBrowser(
+                sc.ctx, lease, sc.rest, sc.cfg.Authenticator.String(),
+                sc.cfg.Application, sc.cfg.Account, sc.cfg.User,
+                sc.cfg.ExternalBrowserTimeout, sc.cfg.DisableConsoleLogin,
+            )
 			if err != nil {
 				// let SAML-phase failure remain retryable; do not set backoff
 				sc.cleanup()
@@ -892,12 +911,12 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 			fallthrough
 
 		// Case 2: still failing, but could be an OAuth refreshable error
-		case errors.As(err, &se) && slices.Contains(refreshOAuthTokenErrorCodes, strconv.Itoa(se.Number)):
-			credentialsStorage.deleteCredential(lease, newOAuthAccessTokenSpec(sc.cfg.OauthTokenRequestURL, sc.cfg.User))
+        case errors.As(err, &se) && slices.Contains(refreshOAuthTokenErrorCodes, strconv.Itoa(se.Number)):
+            _ = deleteCredentialWithLease(newOAuthAccessTokenSpec(sc.cfg.OauthTokenRequestURL, sc.cfg.User))
 
-			if sc.cfg.Authenticator == AuthTypeOAuthAuthorizationCode {
-				doRefreshTokenWithLease(sc, lease)
-			}
+            if sc.cfg.Authenticator == AuthTypeOAuthAuthorizationCode {
+                doRefreshTokenWithLease(sc, lease)
+            }
 
 			// if refreshing succeeds for authorization code, we will take a token from cache
 			// if it fails, we will just run the full flow
@@ -941,7 +960,7 @@ func doRefreshTokenWithLock(sc *snowflakeConn, lease *Lease) {
 		if _, err = getValueWithLock(chooseLockerForAuth(sc.cfg), lockKey, func() (string, error) {
 			if err = oauthClient.refreshToken(lease); err != nil {
 				logger.Warnf("cannot refresh token. %v", err)
-				credentialsStorage.deleteCredential(lease, newOAuthRefreshTokenSpec(sc.cfg.OauthTokenRequestURL, sc.cfg.User))
+            _ = deleteCredentialWithLease(newOAuthRefreshTokenSpec(sc.cfg.OauthTokenRequestURL, sc.cfg.User))
 				return "", err
 			}
 			return "", nil
@@ -957,7 +976,7 @@ func doRefreshTokenWithLease(sc *snowflakeConn, lease *Lease) {
 	} else {
 		if rfErr := oauthClient.refreshToken(lease); rfErr != nil {
 			logger.Warnf("cannot refresh token. %v", rfErr)
-			credentialsStorage.deleteCredential(lease, newOAuthRefreshTokenSpec(sc.cfg.OauthTokenRequestURL, sc.cfg.User))
+            _ = deleteCredentialWithLease(newOAuthRefreshTokenSpec(sc.cfg.OauthTokenRequestURL, sc.cfg.User))
 		}
 	}
 
