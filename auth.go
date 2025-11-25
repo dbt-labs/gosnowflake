@@ -339,7 +339,7 @@ func getHeaders() map[string]string {
 // Used to authenticate the user with Snowflake.
 func authenticate(
 	ctx context.Context,
-	lease *Lease,
+	optionalLease *Lease,
 	sc *snowflakeConn,
 	samlResponse []byte,
 	proofKey []byte,
@@ -403,7 +403,7 @@ func authenticate(
 		sessionParameters[clientStoreTemporaryCredential] = true
 	}
 	bodyCreator := func() ([]byte, error) {
-		return createRequestBody(sc, lease, sessionParameters, clientEnvironment, proofKey, samlResponse)
+		return createRequestBody(sc, optionalLease, sessionParameters, clientEnvironment, proofKey, samlResponse)
 	}
 
 	params := &url.Values{}
@@ -431,13 +431,13 @@ func authenticate(
 		logger.WithContext(ctx).Errorln("Authentication FAILED")
 		sc.rest.TokenAccessor.SetTokens("", "", -1)
 		if sessionParameters[clientRequestMfaToken] == true {
-			_ = credentialsStorage.deleteCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
+			_ = credentialsStorage.deleteCredential(optionalLease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
 		}
 		if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator == AuthTypeExternalBrowser {
-			_ = credentialsStorage.deleteCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+			_ = credentialsStorage.deleteCredential(optionalLease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
 		}
 		if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator.isOauthNativeFlow() {
-			_ = credentialsStorage.deleteCredential(lease, newOAuthAccessTokenSpec(sc.cfg.OauthTokenRequestURL, sc.cfg.User))
+			_ = credentialsStorage.deleteCredential(optionalLease, newOAuthAccessTokenSpec(sc.cfg.OauthTokenRequestURL, sc.cfg.User))
 		}
 		code, err := strconv.Atoi(respd.Code)
 		if err != nil {
@@ -454,7 +454,7 @@ func authenticate(
 
 	if sessionParameters[clientRequestMfaToken] == true && sc.cfg.Authenticator == AuthTypeUsernamePasswordMFA {
 		token := respd.Data.MfaToken
-		_ = credentialsStorage.setCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User), token)
+		_ = credentialsStorage.setCredential(optionalLease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User), token)
 	}
 
 	if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator == AuthTypeExternalBrowser {
@@ -462,7 +462,7 @@ func authenticate(
 		// XXX: for some reason, token is empty here some times and we
 		// don't want to clear the cache, so let's skip it if it's empty
 		if token != "" {
-			_ = credentialsStorage.setCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User), token)
+			_ = credentialsStorage.setCredential(optionalLease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User), token)
 		}
 	}
 	return &respd.Data, nil
