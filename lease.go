@@ -5,6 +5,8 @@ import (
 	entropy "crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"sync"
+
 	// "github.com/timandy/routine"
 	"io"
 	"math"
@@ -64,9 +66,10 @@ func (lease *Lease) Release() error {
 //
 // [1] https://en.wikipedia.org/wiki/Lease_(computer_science)
 type LeaseHandler struct {
-	path          string // absolute path to the lease file
-	dir           string // directory where the lease file is stored
-	timeoutMillis int32  // atomic; how long to keep trying to acquire or renew a lease
+	mu            sync.Mutex // Controls lease contention within a process
+	path          string     // absolute path to the lease file
+	dir           string     // directory where the lease file is stored
+	timeoutMillis int32      // atomic; how long to keep trying to acquire or renew a lease
 }
 
 func NewLeaseHandler(path string, timeout time.Duration) (*LeaseHandler, error) {
@@ -257,6 +260,8 @@ func nextWait(base, m time.Duration) (time.Duration, time.Duration) {
 }
 
 func (l *LeaseHandler) Acquire(ttl time.Duration) (*Lease, error) {
+	l.mu.Lock()
+
 	ttl = max(ttl, MinRequestedTTL)
 
 	newLeaseId, err := randomLeaseId()
@@ -345,6 +350,7 @@ func (l *LeaseHandler) renew(leaseId *string, ttl time.Duration, currentExpiry t
 }
 
 func (handler *LeaseHandler) release(leaseId *string, currentExpiry time.Time) error {
+	defer handler.mu.Unlock()
 	// fmt.Fprintf(os.Stdout, "[%v] Release('%s')\n", routine.Goid(), *leaseId)
 	// // debug-only sanity check
 	// if data, _ := handler.read(0, 0, 0); !data.leaseIsHeld(leaseId, time.Now()) {
