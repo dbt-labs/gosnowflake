@@ -565,7 +565,7 @@ func (sc *snowflakeConn) QueryArrowStream(ctx context.Context, query string, bin
 			JSON:         data.Data.RowSet,
 			RowSetBase64: data.Data.RowSetBase64,
 		},
-		queryID: data.Data.QueryID,
+		queryID:   data.Data.QueryID,
 		resultIDs: resultIDs,
 	}
 	// if multistatement is used, we need to set the first result set to actual result set, not the aggregated response
