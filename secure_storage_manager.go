@@ -3,6 +3,7 @@ package gosnowflake
 import (
 	"errors"
 	"fmt"
+	"github.com/99designs/keyring"
 	"io"
 	"math"
 	"os"
@@ -14,7 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"github.com/99designs/keyring"
 )
 
 const (
