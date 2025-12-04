@@ -33,14 +33,22 @@ type Lease struct {
 	id      string
 	expiry  time.Time // cached lease expiry
 	handler *LeaseHandler
+	// Whether relaxed reads are allowed for this lease.
+	//
+	// This is a hint for consumers of the lease, not enforced by the lease itself.
+	// Users can inspect this field to determine if they can perform relaxed reads
+	// while holding this lease. Destructive operations (e.g., writes) should not
+	// be performed even if this field is true.
+	RelaxedReadAllowed bool
 }
 
 const (
-	ErrFailedToRenewLease = iota
+	ErrOk = iota
+	ErrFailedToRenewLease
 )
 
 type LeaseError struct {
-	ErrCode    int
+	Code       int
 	InnerError error
 }
 
@@ -57,7 +65,7 @@ func (lease *Lease) Renew(ttl time.Duration) error {
 		return nil
 	}
 	lease.expiry = time.Time{}
-	return &LeaseError{ErrCode: ErrFailedToRenewLease, InnerError: err}
+	return &LeaseError{Code: ErrFailedToRenewLease, InnerError: err}
 }
 
 // Makes an effort to release the given leaseId to help other processes acquire
@@ -323,7 +331,7 @@ func (l *LeaseHandler) Acquire(ttl time.Duration) (*Lease, error) {
 		}
 		// fmt.Fprintf(os.Stdout, "[%v] ACQUIRED: id='%s' ttl='%v'\n\n",
 		// 	routine.Goid(), newLeaseId, expiry.Sub(time.Now()))
-		return &Lease{id: newLeaseId, expiry: expiry, handler: l}, nil
+		return &Lease{id: newLeaseId, expiry: expiry, handler: l, RelaxedReadAllowed: false}, nil
 	}
 
 	return nil, fmt.Errorf("timed out trying to acquire lease after %s: %s", l.getTimeout(), l.path)

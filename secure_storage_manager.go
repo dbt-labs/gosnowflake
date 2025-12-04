@@ -229,11 +229,16 @@ func (ssm *fileBasedSecureStorageManager) acquireLease() (*Lease, error) {
 	return ssm.leaseHandler.Acquire(leaseTTL())
 }
 
-func (ssm *fileBasedSecureStorageManager) withCacheFile(lease *Lease, action func(*os.File) error) error {
-	err := lease.Renew(leaseTTL() / 2)
-	if err != nil {
-		logger.Warnf("Unable to lease cache. %v", err)
-		return err
+func (ssm *fileBasedSecureStorageManager) withCacheFile(lease *Lease, relaxed bool, action func(*os.File) error) error {
+	var err error
+	// When relaxed is true, we do not renew the lease before running action on the
+	// file. relaxed=true must never be used for write operations.
+	if !relaxed {
+		err = lease.Renew(leaseTTL() / 2)
+		if err != nil {
+			logger.Warnf("Unable to lease cache. %v", err)
+			return err
+		}
 	}
 
 	const cachefilePermissions = 0600
@@ -304,7 +309,7 @@ func (ssm *fileBasedSecureStorageManager) setCredential(lease *Lease, tokenSpec 
 		return err
 	}
 
-	return ssm.withCacheFile(lease, func(cacheFile *os.File) error {
+	return ssm.withCacheFile(lease, false, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file: %v", err)
@@ -403,7 +408,7 @@ func (ssm *fileBasedSecureStorageManager) getCredential(lease *Lease, tokenSpec 
 	}
 
 	ret := ""
-	err = ssm.withCacheFile(lease, func(cacheFile *os.File) error {
+	err = ssm.withCacheFile(lease, lease.RelaxedReadAllowed, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
@@ -508,7 +513,7 @@ func (ssm *fileBasedSecureStorageManager) deleteCredential(lease *Lease, tokenSp
 		return err
 	}
 
-	return ssm.withCacheFile(lease, func(cacheFile *os.File) error {
+	return ssm.withCacheFile(lease, false, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)

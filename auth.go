@@ -431,13 +431,22 @@ func authenticate(
 		logger.WithContext(ctx).Errorln("Authentication FAILED")
 		sc.rest.TokenAccessor.SetTokens("", "", -1)
 		if sessionParameters[clientRequestMfaToken] == true {
-			credentialsStorage.deleteCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
+			err = credentialsStorage.deleteCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
+			if lease.RelaxedReadAllowed && err != nil {
+				return nil, err
+			}
 		}
 		if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator == AuthTypeExternalBrowser {
-			credentialsStorage.deleteCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+			err = credentialsStorage.deleteCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+			if lease.RelaxedReadAllowed && err != nil {
+				return nil, err
+			}
 		}
 		if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator.isOauthNativeFlow() {
-			credentialsStorage.deleteCredential(lease, newOAuthAccessTokenSpec(sc.cfg.OauthTokenRequestURL, sc.cfg.User))
+			err = credentialsStorage.deleteCredential(lease, newOAuthAccessTokenSpec(sc.cfg.OauthTokenRequestURL, sc.cfg.User))
+			if lease.RelaxedReadAllowed && err != nil {
+				return nil, err
+			}
 		}
 		code, err := strconv.Atoi(respd.Code)
 		if err != nil {
@@ -454,7 +463,10 @@ func authenticate(
 
 	if sessionParameters[clientRequestMfaToken] == true && sc.cfg.Authenticator == AuthTypeUsernamePasswordMFA {
 		token := respd.Data.MfaToken
-		credentialsStorage.setCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User), token)
+		err = credentialsStorage.setCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User), token)
+		if lease.RelaxedReadAllowed && err != nil {
+			return nil, err
+		}
 	}
 
 	if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator == AuthTypeExternalBrowser {
@@ -462,7 +474,10 @@ func authenticate(
 		// XXX: for some reason, token is empty here some times and we
 		// don't want to clear the cache, so let's skip it if it's empty
 		if token != "" {
-			credentialsStorage.setCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User), token)
+			err = credentialsStorage.setCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User), token)
+			if lease.RelaxedReadAllowed && err != nil {
+				return nil, err
+			}
 		}
 	}
 	return &respd.Data, nil
@@ -734,14 +749,28 @@ func extBrowserBackoffKey(host, user string) string {
 
 // Authenticate with sc.cfg
 func authenticateWithConfig(sc *snowflakeConn) error {
-	lease, err := credentialsStorage.acquireLease()
-	if err != nil {
-		return err
-	}
+	var lease *Lease
+	var err error
+
+	// In the first auth attempt we don't acquire a new lease, but use a broken
+	// lease and relaxed reads. If any operation needs a lease renewal, we get an
+	// ErrFailedToRenewLease error and try again with a proper acquired lease.
+	lease = credentialsStorage.brokenLease()
+	lease.RelaxedReadAllowed = true
 	defer lease.Release()
 
-	err = tryAuthenticateWithConfig(lease, sc)
-	if err != nil {
+	for i := 0; i < 2; i++ {
+		err = tryAuthenticateWithConfig(lease, sc)
+		if err == nil {
+			return nil
+		}
+		var leaseErr *LeaseError
+		if lease.RelaxedReadAllowed && errors.As(err, &leaseErr) && leaseErr.Code == ErrFailedToRenewLease {
+			lease, err = credentialsStorage.acquireLease()
+			if err == nil {
+				continue // retry once after acquiring lease
+			}
+		}
 		return err
 	}
 	return nil
@@ -870,7 +899,10 @@ func tryAuthenticateWithConfig(lease *Lease, sc *snowflakeConn) error {
 		switch {
 		// Case 1: cached ID token failed -> clear + try one interactive refresh
 		case sc.cfg.Authenticator == AuthTypeExternalBrowser && sc.cfg.IDToken != "":
-			credentialsStorage.deleteCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+			err = credentialsStorage.deleteCredential(lease, newIDTokenSpec(sc.cfg.Host, sc.cfg.User))
+			if lease.RelaxedReadAllowed && err != nil {
+				return err // cannot delete in relaxed read mode, outer loop will retry with proper lease
+			}
 			sc.cfg.IDToken = ""
 
 			// NOTE on tabstorms:
