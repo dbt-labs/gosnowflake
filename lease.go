@@ -37,16 +37,29 @@ type Lease struct {
 	handler *LeaseHandler
 }
 
+const (
+	ErrFailedToRenewLease = iota
+)
+
+type LeaseError struct {
+	ErrCode    int
+	InnerError error
+}
+
+func (e *LeaseError) Error() string {
+	return e.InnerError.Error()
+}
+
 // Ensure the lease will be valid for at least the given TTL. Users should
 // call this periodically to keep the lease alive (e.g. every TTL/2 interval).
 func (lease *Lease) Renew(ttl time.Duration) error {
 	newExpiry, err := lease.handler.renew(&lease.id, ttl, lease.expiry)
 	if err == nil {
 		lease.expiry = newExpiry
-	} else {
-		lease.expiry = time.Time{}
+		return nil
 	}
-	return err
+	lease.expiry = time.Time{}
+	return &LeaseError{ErrCode: ErrFailedToRenewLease, InnerError: err}
 }
 
 // Makes an effort to release the given leaseId to help other processes acquire
@@ -257,6 +270,12 @@ func nextWait(base, m time.Duration) (time.Duration, time.Duration) {
 	}
 	base = m / 2
 	return base, m
+}
+
+func (l *LeaseHandler) BrokenLease() *Lease {
+	newLeaseId := fmt.Sprintf("broken-lease-%d", rand.Int63())
+	expiry := time.Time{}
+	return &Lease{id: newLeaseId, expiry: expiry, handler: l}
 }
 
 func (l *LeaseHandler) Acquire(ttl time.Duration) (*Lease, error) {
