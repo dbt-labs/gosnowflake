@@ -734,6 +734,20 @@ func extBrowserBackoffKey(host, user string) string {
 
 // Authenticate with sc.cfg
 func authenticateWithConfig(sc *snowflakeConn) error {
+	lease, err := credentialsStorage.acquireLease()
+	if err != nil {
+		return err
+	}
+	defer lease.Release()
+
+	err = tryAuthenticateWithConfig(lease, sc)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func tryAuthenticateWithConfig(lease *Lease, sc *snowflakeConn) error {
 	var authData *authResponseMain
 	var samlResponse []byte
 	var proofKey []byte
@@ -741,12 +755,6 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 
 	mfaTokenLockKey := newMfaTokenLockKey(sc.cfg.Host, sc.cfg.User)
 	idTokenLockKey := newIDTokenLockKey(sc.cfg.Host, sc.cfg.User)
-
-	lease, err := credentialsStorage.acquireLease()
-	if err != nil {
-		return err
-	}
-	defer lease.Release()
 
 	key := extBrowserBackoffKey(sc.cfg.Host, sc.cfg.User)
 
