@@ -111,6 +111,7 @@ func credCacheDirPath() (string, error) {
 }
 
 type secureStorageManager interface {
+	brokenLease() *Lease
 	acquireLease() (*Lease, error)
 	setCredential(lease *Lease, tokenSpec *secureTokenSpec, value string) error
 	getCredential(lease *Lease, tokenSpec *secureTokenSpec) (string, error)
@@ -218,6 +219,10 @@ func (ssm *fileBasedSecureStorageManager) getTokens(data map[string]any) map[str
 	}
 
 	return tokens
+}
+
+func (ssm *fileBasedSecureStorageManager) brokenLease() *Lease {
+	return ssm.leaseHandler.BrokenLease()
 }
 
 func (ssm *fileBasedSecureStorageManager) acquireLease() (*Lease, error) {
@@ -657,6 +662,10 @@ func (ssm *keyringSecureStorageManager) releaseLease(_ *Lease) error {
 }
 
 type noopSecureStorageManager struct {
+}
+
+func (ssm *noopSecureStorageManager) brokenLease() *Lease {
+	return nil // no-op implementation for secure storage manager
 }
 
 func (ssm *noopSecureStorageManager) acquireLease() (*Lease, error) {
