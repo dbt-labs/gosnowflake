@@ -3,6 +3,7 @@ package gosnowflake
 import (
 	"fmt"
 	// "github.com/timandy/routine"
+	"errors"
 	"math/rand"
 	"os"
 	"sync"
@@ -36,11 +37,30 @@ func TestLeaseAcquireAndRelease(t *testing.T) {
 	assertNilF(t, err)
 	lease, err := handler.Acquire(ttl)
 	assertNilF(t, err)
+	assertFalseE(t, lease.RelaxedReadAllowed)
 	err = lease.Release()
 	assertNilF(t, err)
 	// can't Renew() after Release()
 	err = lease.Renew(ttl)
 	assertNotNilF(t, err)
+}
+
+func TestRenewBrokenLease(t *testing.T) {
+	leaseFilepath := "renew_broken.lease"
+
+	handler, err := NewLeaseHandler(leaseFilepath, DefaultLeaseOperationTimeout)
+	assertNilF(t, err)
+	lease := handler.BrokenLease()
+
+	assertFalseF(t, lease.RelaxedReadAllowed, "RelaxedReadAllowed must be explicitly set to true if caller wants to allow relaxed reads under broken lease")
+
+	// can't Renew() broken lease
+	err = lease.Renew(MinRequestedTTL)
+	assertNotNilF(t, err)
+
+	leaseErr := &LeaseError{Code: ErrOk, InnerError: nil}
+	assertTrueF(t, errors.As(err, &leaseErr), "expected LeaseError type")
+	assertEqualF(t, leaseErr.Code, ErrFailedToRenewLease, "expected broken lease error code")
 }
 
 // Simulate `n` processes acquiring a lease, sleeping for a random duration

@@ -280,7 +280,7 @@ func nextWait(base, m time.Duration) (time.Duration, time.Duration) {
 func (l *LeaseHandler) BrokenLease() *Lease {
 	newLeaseId := fmt.Sprintf("broken-lease-%d", rand.Int63())
 	expiry := time.Time{}
-	return &Lease{id: newLeaseId, expiry: expiry, handler: l}
+	return &Lease{id: newLeaseId, expiry: expiry, handler: l, RelaxedReadAllowed: false}
 }
 
 func (l *LeaseHandler) Acquire(ttl time.Duration) (*Lease, error) {
