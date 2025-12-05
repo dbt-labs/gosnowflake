@@ -365,8 +365,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 				cfg.SingleAuthenticationPrompt = singleAuthenticationPrompt
 				oauthAccessTokenSpec := newOAuthAccessTokenSpec(cfg.OauthTokenRequestURL, cfg.User)
 				oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg.OauthTokenRequestURL, cfg.User)
-				credentialsStorage.deleteCredential(oauthAccessTokenSpec)
-				credentialsStorage.deleteCredential(oauthRefreshTokenSpec)
+				credentialsStorage.deleteCredential(nil, oauthAccessTokenSpec)
+				credentialsStorage.deleteCredential(nil, oauthRefreshTokenSpec)
 				connector := NewConnector(SnowflakeDriver{}, *cfg)
 				db := sql.OpenDB(connector)
 				initPoolWithSize(t, db, 20)
@@ -393,8 +393,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		cfg.EnableSingleUseRefreshTokens = true
 		oauthAccessTokenSpec := newOAuthAccessTokenSpec(cfg.OauthTokenRequestURL, cfg.User)
 		oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg.OauthTokenRequestURL, cfg.User)
-		credentialsStorage.deleteCredential(oauthAccessTokenSpec)
-		credentialsStorage.deleteCredential(oauthRefreshTokenSpec)
+		credentialsStorage.deleteCredential(nil, oauthAccessTokenSpec)
+		credentialsStorage.deleteCredential(nil, oauthRefreshTokenSpec)
 		connector := NewConnector(SnowflakeDriver{}, *cfg)
 		db := sql.OpenDB(connector)
 		runSmokeQuery(t, db)
