@@ -5,8 +5,6 @@ import (
 	entropy "crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"sync"
-
 	// "github.com/timandy/routine"
 	"io"
 	"math"
@@ -35,6 +33,27 @@ type Lease struct {
 	id      string
 	expiry  time.Time // cached lease expiry
 	handler *LeaseHandler
+	// Whether relaxed reads are allowed for this lease.
+	//
+	// This is a hint for consumers of the lease, not enforced by the lease itself.
+	// Users can inspect this field to determine if they can perform relaxed reads
+	// while holding this lease. Destructive operations (e.g., writes) should not
+	// be performed even if this field is true.
+	RelaxedReadAllowed bool
+}
+
+const (
+	ErrOk = iota
+	ErrFailedToRenewLease
+)
+
+type LeaseError struct {
+	Code       int
+	InnerError error
+}
+
+func (e *LeaseError) Error() string {
+	return e.InnerError.Error()
 }
 
 // Ensure the lease will be valid for at least the given TTL. Users should
@@ -43,10 +62,10 @@ func (lease *Lease) Renew(ttl time.Duration) error {
 	newExpiry, err := lease.handler.renew(&lease.id, ttl, lease.expiry)
 	if err == nil {
 		lease.expiry = newExpiry
-	} else {
-		lease.expiry = time.Time{}
+		return nil
 	}
-	return err
+	lease.expiry = time.Time{}
+	return &LeaseError{Code: ErrFailedToRenewLease, InnerError: err}
 }
 
 // Makes an effort to release the given leaseId to help other processes acquire
@@ -66,10 +85,9 @@ func (lease *Lease) Release() error {
 //
 // [1] https://en.wikipedia.org/wiki/Lease_(computer_science)
 type LeaseHandler struct {
-	mu            sync.Mutex // Controls lease contention within a process
-	path          string     // absolute path to the lease file
-	dir           string     // directory where the lease file is stored
-	timeoutMillis int32      // atomic; how long to keep trying to acquire or renew a lease
+	path          string // absolute path to the lease file
+	dir           string // directory where the lease file is stored
+	timeoutMillis int32  // atomic; how long to keep trying to acquire or renew a lease
 }
 
 func NewLeaseHandler(path string, timeout time.Duration) (*LeaseHandler, error) {
@@ -259,9 +277,13 @@ func nextWait(base, m time.Duration) (time.Duration, time.Duration) {
 	return base, m
 }
 
-func (l *LeaseHandler) Acquire(ttl time.Duration) (*Lease, error) {
-	l.mu.Lock()
+func (l *LeaseHandler) BrokenLease() *Lease {
+	newLeaseId := fmt.Sprintf("broken-lease-%d", rand.Int63())
+	expiry := time.Time{}
+	return &Lease{id: newLeaseId, expiry: expiry, handler: l, RelaxedReadAllowed: false}
+}
 
+func (l *LeaseHandler) Acquire(ttl time.Duration) (*Lease, error) {
 	ttl = max(ttl, MinRequestedTTL)
 
 	newLeaseId, err := randomLeaseId()
@@ -309,7 +331,7 @@ func (l *LeaseHandler) Acquire(ttl time.Duration) (*Lease, error) {
 		}
 		// fmt.Fprintf(os.Stdout, "[%v] ACQUIRED: id='%s' ttl='%v'\n\n",
 		// 	routine.Goid(), newLeaseId, expiry.Sub(time.Now()))
-		return &Lease{id: newLeaseId, expiry: expiry, handler: l}, nil
+		return &Lease{id: newLeaseId, expiry: expiry, handler: l, RelaxedReadAllowed: false}, nil
 	}
 
 	return nil, fmt.Errorf("timed out trying to acquire lease after %s: %s", l.getTimeout(), l.path)
@@ -350,7 +372,6 @@ func (l *LeaseHandler) renew(leaseId *string, ttl time.Duration, currentExpiry t
 }
 
 func (handler *LeaseHandler) release(leaseId *string, currentExpiry time.Time) error {
-	defer handler.mu.Unlock()
 	// fmt.Fprintf(os.Stdout, "[%v] Release('%s')\n", routine.Goid(), *leaseId)
 	// // debug-only sanity check
 	// if data, _ := handler.read(0, 0, 0); !data.leaseIsHeld(leaseId, time.Now()) {

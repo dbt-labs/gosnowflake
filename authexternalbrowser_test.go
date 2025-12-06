@@ -182,11 +182,11 @@ type nonInteractiveSamlResponseProvider struct {
 	t *testing.T
 }
 
-func (provider *nonInteractiveSamlResponseProvider) run(url string) error {
+func (provider *nonInteractiveSamlResponseProvider) run(url string) (string, error) {
 	go func() {
 		resp, err := http.Get(url)
 		assertNilF(provider.t, err)
 		assertEqualE(provider.t, resp.StatusCode, http.StatusOK)
 	}()
-	return nil
+	return "", nil
 }
