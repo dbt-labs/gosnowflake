@@ -757,9 +757,9 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 	// ErrFailedToRenewLease error and try again with a proper acquired lease.
 	lease = credentialsStorage.brokenLease()
 	lease.RelaxedReadAllowed = true
-	defer lease.Release()
 
 	for i := 0; i < 2; i++ {
+		defer lease.Release()
 		err = tryAuthenticateWithConfig(lease, sc)
 		if err == nil {
 			return nil
