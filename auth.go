@@ -776,6 +776,10 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 	return nil
 }
 
+// Prepare for main authenticate(...) call and handle result payload
+//
+// This is a hefty function which contains both state logic to avoid tab
+// storms and the enablement of grabbing cached tokens.
 func tryAuthenticateWithConfig(lease *Lease, sc *snowflakeConn) error {
 	var authData *authResponseMain
 	var samlResponse []byte
@@ -787,6 +791,11 @@ func tryAuthenticateWithConfig(lease *Lease, sc *snowflakeConn) error {
 
 	key := extBrowserBackoffKey(sc.cfg.Host, sc.cfg.User)
 
+	// ============================
+	// attempt to grab cached token
+	// ============================
+
+	// Case 1: Oauth tokens
 	if sc.cfg.Authenticator == AuthTypeExternalBrowser || sc.cfg.Authenticator == AuthTypeOAuthAuthorizationCode || sc.cfg.Authenticator == AuthTypeOAuthClientCredentials {
 		if isCacheSupportedGOOS(runtime.GOOS) && sc.cfg.ClientStoreTemporaryCredential == configBoolNotSet {
 			sc.cfg.ClientStoreTemporaryCredential = ConfigBoolTrue
@@ -819,40 +828,44 @@ func tryAuthenticateWithConfig(lease *Lease, sc *snowflakeConn) error {
 				sc.cfg.DisableConsoleLogin = ConfigBoolTrue
 			}
 		}
+	}
 
-		if sc.cfg.Authenticator == AuthTypeUsernamePasswordMFA {
-			if (runtime.GOOS == "windows" || runtime.GOOS == "darwin") && sc.cfg.ClientRequestMfaToken == configBoolNotSet {
-				sc.cfg.ClientRequestMfaToken = ConfigBoolTrue
+	// Case 2: MFA (+ user and password) tokens
+	if sc.cfg.Authenticator == AuthTypeUsernamePasswordMFA {
+		if (runtime.GOOS == "windows" || runtime.GOOS == "darwin") && sc.cfg.ClientRequestMfaToken == configBoolNotSet {
+			sc.cfg.ClientRequestMfaToken = ConfigBoolTrue
+		}
+		if isEligibleForParallelLogin(sc.cfg, sc.cfg.ClientRequestMfaToken) {
+			valueAwaiter := valueAwaitHolder.get(mfaTokenLockKey)
+			defer valueAwaiter.resumeOne()
+			sc.cfg.MfaToken, _ = awaitValue(
+				valueAwaiter,
+				func() (string, error) {
+					tok, err := credentialsStorage.getCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
+					if err != nil {
+						logger.WithContext(sc.ctx).Warnf("failed to get MFA token from credential storage: %v", err)
+					}
+					return tok, nil
+				}, func(s string, err error) bool {
+					return s != ""
+				}, func() string {
+					return ""
+				},
+			)
+		} else if sc.cfg.ClientRequestMfaToken == ConfigBoolTrue {
+			tok, err := credentialsStorage.getCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
+			if err != nil {
+				logger.WithContext(sc.ctx).Warnf("failed to get MFA token from credential storage: %v", err)
 			}
-			if isEligibleForParallelLogin(sc.cfg, sc.cfg.ClientRequestMfaToken) {
-				valueAwaiter := valueAwaitHolder.get(mfaTokenLockKey)
-				defer valueAwaiter.resumeOne()
-				sc.cfg.MfaToken, _ = awaitValue(
-					valueAwaiter,
-					func() (string, error) {
-						tok, err := credentialsStorage.getCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
-						if err != nil {
-							logger.WithContext(sc.ctx).Warnf("failed to get MFA token from credential storage: %v", err)
-						}
-						return tok, nil
-					}, func(s string, err error) bool {
-						return s != ""
-					}, func() string {
-						return ""
-					},
-				)
-			} else if sc.cfg.ClientRequestMfaToken == ConfigBoolTrue {
-				tok, err := credentialsStorage.getCredential(lease, newMfaTokenSpec(sc.cfg.Host, sc.cfg.User))
-				if err != nil {
-					logger.WithContext(sc.ctx).Warnf("failed to get MFA token from credential storage: %v", err)
-				}
-				sc.cfg.MfaToken = tok
-			}
+			sc.cfg.MfaToken = tok
 		}
 	}
 
-	logger.WithContext(sc.ctx).Infof("Authenticating via %v", sc.cfg.Authenticator.String())
+	// =======================
+	// proceed to auth routine
+	// =======================
 
+	logger.WithContext(sc.ctx).Infof("Authenticating via %v", sc.cfg.Authenticator.String())
 	switch sc.cfg.Authenticator {
 	case AuthTypeExternalBrowser:
 		if sc.cfg.IDToken == "" {
