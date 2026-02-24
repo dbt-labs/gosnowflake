@@ -483,13 +483,28 @@ func authenticate(
 	return &respd.Data, nil
 }
 
+// parseAccount returns the account name without region (part before first ".").
+// The return is supposed to be used for the "ACCOUNT_NAME" field from an auth request body.
+//
+// reference: https://github.com/snowflakedb/snowflake-connector-python/blob/f087cf6cdf684a44b40e6bbe329f597ac0997707/src/snowflake/connector/util_text.py#L258
+// this doesn't exactly match since I wasn't able to find examples for accounts with the keyword "global" or external ID
+//
+// Without this, an auth request hit a 404 if the account name is in <Account Identifier>.<Region> format
+// but the region is not the default region
+func parseAccount(account string) string {
+	if i := strings.Index(account, "."); i > 0 {
+		return account[:i]
+	}
+	return account
+}
+
 func createRequestBody(sc *snowflakeConn, lease *Lease, sessionParameters map[string]interface{},
 	clientEnvironment authRequestClientEnvironment, proofKey []byte, samlResponse []byte,
 ) ([]byte, error) {
 	requestMain := authRequestData{
 		ClientAppID:       clientType,
 		ClientAppVersion:  SnowflakeGoDriverVersion,
-		AccountName:       sc.cfg.Account,
+		AccountName:       parseAccount(sc.cfg.Account),
 		SessionParameters: sessionParameters,
 		ClientEnvironment: clientEnvironment,
 	}
