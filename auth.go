@@ -483,13 +483,41 @@ func authenticate(
 	return &respd.Data, nil
 }
 
+// Returns the Snowflake account identifier used for auth requests.
+//
+// Reference: snowflake-connector-python https://github.com/snowflakedb/snowflake-connector-python/blob/f087cf6cdf684a44b40e6bbe329f597ac0997707/src/snowflake/connector/util_text.py#L258
+//
+// 1. "<account>"                       no dot; returned unchanged
+// 2. "<account>.<region>"              region subdomain removed
+// 3. "<account>-<external_id>.global"  "global" locator; external ID suffix after last '-' removed
+// 4. "<account>.global" 		no external ID present
+//
+// Deviation: in case (4), upstream Python slices head[: -1] when no '-'
+// is present (rfind returns -1), unintentionally using sentinel which drops the last character.
+func parseAccount(account string) string {
+	parts := strings.Split(account, ".")
+	if len(parts) <= 1 {
+		return account
+	}
+
+	head := parts[0]
+	if parts[1] == "global" {
+		if j := strings.LastIndex(head, "-"); j >= 0 {
+			return head[:j]
+		}
+		return head
+	}
+
+	return head
+}
+
 func createRequestBody(sc *snowflakeConn, lease *Lease, sessionParameters map[string]interface{},
 	clientEnvironment authRequestClientEnvironment, proofKey []byte, samlResponse []byte,
 ) ([]byte, error) {
 	requestMain := authRequestData{
 		ClientAppID:       clientType,
 		ClientAppVersion:  SnowflakeGoDriverVersion,
-		AccountName:       sc.cfg.Account,
+		AccountName:       parseAccount(sc.cfg.Account),
 		SessionParameters: sessionParameters,
 		ClientEnvironment: clientEnvironment,
 	}
