@@ -483,19 +483,32 @@ func authenticate(
 	return &respd.Data, nil
 }
 
-// parseAccount returns the account name without region (part before first ".").
-// The return is supposed to be used for the "ACCOUNT_NAME" field from an auth request body.
+// Returns the Snowflake account identifier used for auth requests.
 //
-// reference: https://github.com/snowflakedb/snowflake-connector-python/blob/f087cf6cdf684a44b40e6bbe329f597ac0997707/src/snowflake/connector/util_text.py#L258
-// this doesn't exactly match since I wasn't able to find examples for accounts with the keyword "global" or external ID
+// Reference: snowflake-connector-python https://github.com/snowflakedb/snowflake-connector-python/blob/f087cf6cdf684a44b40e6bbe329f597ac0997707/src/snowflake/connector/util_text.py#L258
 //
-// Without this, an auth request hit a 404 if the account name is in <Account Identifier>.<Region> format
-// but the region is not the default region
+// 1. "<account>"                       no dot; returned unchanged
+// 2. "<account>.<region>"              region subdomain removed
+// 3. "<account>-<external_id>.global"  "global" locator; external ID suffix after last '-' removed
+// 4. "<account>.global" 		no external ID present
+//
+// Deviation: in case (4), upstream Python slices head[: -1] when no '-'
+// is present (rfind returns -1), unintentionally using sentinel which drops the last character.
 func parseAccount(account string) string {
-	if i := strings.Index(account, "."); i > 0 {
-		return account[:i]
+	parts := strings.Split(account, ".")
+	if len(parts) <= 1 {
+		return account
 	}
-	return account
+
+	head := parts[0]
+	if parts[1] == "global" {
+		if j := strings.LastIndex(head, "-"); j >= 0 {
+			return head[:j]
+		}
+		return head
+	}
+
+	return head
 }
 
 func createRequestBody(sc *snowflakeConn, lease *Lease, sessionParameters map[string]interface{},

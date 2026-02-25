@@ -56,18 +56,37 @@ func TestUnitPostAuth(t *testing.T) {
 	}
 }
 
-// TestParseAccount covers parseAccount: strip region (part after first "."), otherwise return as-is.
+// TestParseAccount verifies parseAccount:
+// - returns the input unchanged if no dot is present
+// - strips everything after the first dot (region or extra labels)
+// - if the second label is "global", also strips an external ID suffix
+//   after the last '-' in the account portion
 func TestParseAccount(t *testing.T) {
 	tests := []struct {
 		name     string
 		account  string
 		expected string
 	}{
+		// baseline behavior
 		{"no_dot", "account1", "account1"},
 		{"empty", "", ""},
 		{"account_region", "account1.eu-central-1", "account1"},
 		{"three_parts", "acct.region.suffix", "acct"},
+
+		// "global" behavior
+		{"global_with_external_id", "acct-xyz123.global", "acct"},
+		{"global_with_dashes_in_name", "my-acct-prod-xyz123.global", "my-acct-prod"},
+		{"global_without_dash", "acct.global", "acct"}, // deviation vs upstream python bug
+		{"global_with_more_labels", "acct-xyz123.global.snowflakecomputing.com", "acct"},
+
+		// global only applies when second label is exactly "global"
+		{"global_not_second_label", "acct.region.global", "acct"},
+
+		// dot edge cases
+		{"leading_dot", ".region", ""},
+		{"trailing_dot", "acct.", "acct"},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := parseAccount(tt.account)
