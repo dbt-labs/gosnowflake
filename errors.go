@@ -99,9 +99,25 @@ const (
 	queryInProgressCode         = "333333"
 	queryInProgressAsyncCode    = "333334"
 	sessionExpiredCode          = "390112"
+	authTokenExpiredCode        = "390114"
 	invalidOAuthAccessTokenCode = "390303"
 	expiredOAuthAccessTokenCode = "390318"
 )
+
+func isSessionExpiredCode(code string) bool {
+	return code == sessionExpiredCode || code == authTokenExpiredCode
+}
+
+func expiredTokenType(code string) string {
+	switch code {
+	case sessionExpiredCode:
+		return "session token"
+	case authTokenExpiredCode:
+		return "authentication token"
+	default:
+		return "token"
+	}
+}
 
 // Driver return errors
 const (

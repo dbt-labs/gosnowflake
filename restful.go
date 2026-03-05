@@ -250,7 +250,7 @@ func postRestfulQueryHelper(
 			logger.WithContext(ctx).Errorf("failed to decode JSON. err: %v", err)
 			return nil, err
 		}
-		if respd.Code == sessionExpiredCode {
+		if isSessionExpiredCode(respd.Code) {
 			if err = sr.renewExpiredSessionToken(ctx, timeout, token); err != nil {
 				return nil, err
 			}
@@ -295,7 +295,7 @@ func postRestfulQueryHelper(
 				logger.WithContext(ctx).Errorf("failed to decode JSON. err: %v", err)
 				return nil, err
 			}
-			if respd.Code == sessionExpiredCode {
+			if isSessionExpiredCode(respd.Code) {
 				if err = sr.renewExpiredSessionToken(ctx, timeout, token); err != nil {
 					return nil, err
 				}
@@ -348,7 +348,7 @@ func closeSession(ctx context.Context, sr *snowflakeRestful, timeout time.Durati
 			logger.WithContext(ctx).Errorf("failed to decode JSON. err: %v", err)
 			return err
 		}
-		if !respd.Success && respd.Code != sessionExpiredCode {
+		if !respd.Success && !isSessionExpiredCode(respd.Code) {
 			c, err := strconv.Atoi(respd.Code)
 			if err != nil {
 				return err
@@ -490,7 +490,7 @@ func cancelQuery(ctx context.Context, sr *snowflakeRestful, requestID UUID, time
 			return err
 		}
 		ctxRetry := getCancelRetry(ctx)
-		if !respd.Success && respd.Code == sessionExpiredCode {
+		if !respd.Success && isSessionExpiredCode(respd.Code) {
 			if err = sr.FuncRenewSession(ctx, sr, timeout); err != nil {
 				return err
 			}
