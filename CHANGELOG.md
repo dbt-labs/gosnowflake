@@ -2,6 +2,11 @@
 
 ## Upcoming Release
 
+Bug fixes:
+
+- Handle HTTP307 & 308 in drivers to achieve better resiliency to backend errors (snowflakedb/gosnowflake#1616).
+
+- Fix unsafe reflection of nil pointer on DECFLOAT func in bind uploader (snowflakedb/gosnowflake#1604).
 - Added temporary download files cleanup (snowflakedb/gosnowflake#1577)
 - Marked fields as deprecated (snowflakedb/gosnowflake#1556)
 - Exposed `QueryStatus` from `SnowflakeResult` and `SnowflakeRows` in `GetStatus()` function (snowflakedb/gosnowflake#1556)
