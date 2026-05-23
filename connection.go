@@ -916,6 +916,15 @@ func buildSnowflakeConn(ctx context.Context, config Config) (*snowflakeConn, err
 			Timeout:   sc.cfg.JWTClientTimeout,
 			Transport: st,
 		},
+		AuthClient: &http.Client{
+			// Per-HTTP-attempt timeout for non-JWT authentication (warehouse
+			// password, native OAuth, MFA, SSO, PAT, external browser, etc.).
+			// Allows callers to bound auth roundtrips without also bounding
+			// query roundtrips, mirroring `snowflake-connector-python`'s
+			// `requests` per-call timeout for auth requests.
+			Timeout:   sc.cfg.AuthClientTimeout,
+			Transport: st,
+		},
 		TokenAccessor:       tokenAccessor,
 		LoginTimeout:        sc.cfg.LoginTimeout,
 		RequestTimeout:      sc.cfg.RequestTimeout,

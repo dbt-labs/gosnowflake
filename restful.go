@@ -55,6 +55,7 @@ type snowflakeRestful struct {
 
 	Client        *http.Client
 	JWTClient     *http.Client
+	AuthClient    *http.Client
 	TokenAccessor TokenAccessor
 	HeartBeat     *heartbeat
 
@@ -94,12 +95,19 @@ func (sr *snowflakeRestful) getFullURL(path string, params *url.Values) *url.URL
 	return ret
 }
 
-// We need separate client for JWT, because if token processing takes too long, token may be already expired.
+// We use a dedicated client for JWT auth (because if token processing takes
+// too long the token may be already expired) and a separate dedicated client
+// for all other authentication requests (so the per-HTTP-attempt timeout for
+// auth can be tightened without affecting query timeouts). The query path
+// keeps the original Client.
 func (sr *snowflakeRestful) getClientFor(authType AuthType) *http.Client {
 	switch authType {
 	case AuthTypeJwt:
 		return sr.JWTClient
 	default:
+		if sr.AuthClient != nil {
+			return sr.AuthClient
+		}
 		return sr.Client
 	}
 }
