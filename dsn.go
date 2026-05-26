@@ -18,8 +18,13 @@ import (
 )
 
 const (
-	defaultClientTimeout          = 900 * time.Second // Timeout for network round trip + read out http response
-	defaultJWTClientTimeout       = 10 * time.Second  // Timeout for network round trip + read out http response but used for JWT auth
+	defaultClientTimeout    = 900 * time.Second // Timeout for network round trip + read out http response
+	defaultJWTClientTimeout = 10 * time.Second  // Timeout for network round trip + read out http response but used for JWT auth
+	// Timeout for network round trip + read out http response used for non-JWT authentication requests,
+	// mirroring http socket timeout used in the `snowflake-connector-python`
+	//
+	// reference: https://github.com/snowflakedb/snowflake-connector-python/blob/d1251d9f01bbf06b4b58d09f81d5e0717cc546be/src/snowflake/connector/network.py#L1090
+	defaultAuthClientTimeout      = 60 * time.Second
 	defaultLoginTimeout           = 300 * time.Second // Timeout for retry for login EXCLUDING clientTimeout
 	defaultRequestTimeout         = 0 * time.Second   // Timeout for retry for request EXCLUDING clientTimeout
 	defaultJWTTimeout             = 60 * time.Second
@@ -101,7 +106,8 @@ type Config struct {
 	// Deprecated: timeouts may be reorganized in a future release.
 	ClientTimeout time.Duration // Timeout for network round trip + read out http response
 	// Deprecated: timeouts may be reorganized in a future release.
-	JWTClientTimeout time.Duration // Timeout for network round trip + read out http response used when JWT token auth is taking place
+	JWTClientTimeout  time.Duration // Timeout for network round trip + read out http response used when JWT token auth is taking place
+	AuthClientTimeout time.Duration // Timeout for network round trip + read out http response used for non-JWT authentication requests
 	// Deprecated: timeouts may be reorganized in a future release.
 	ExternalBrowserTimeout time.Duration // Timeout for external browser login
 	// Deprecated: timeouts may be reorganized in a future release.
@@ -651,6 +657,9 @@ func fillMissingConfigParameters(cfg *Config) error {
 	if cfg.JWTClientTimeout == 0 {
 		cfg.JWTClientTimeout = defaultJWTClientTimeout
 	}
+	if cfg.AuthClientTimeout == 0 {
+		cfg.AuthClientTimeout = defaultAuthClientTimeout
+	}
 	if cfg.ExternalBrowserTimeout == 0 {
 		cfg.ExternalBrowserTimeout = defaultExternalBrowserTimeout
 	}
@@ -915,6 +924,11 @@ func parseDSNParams(cfg *Config, params string) (err error) {
 			}
 		case "jwtClientTimeout":
 			cfg.JWTClientTimeout, err = parseTimeout(value)
+			if err != nil {
+				return
+			}
+		case "authClientTimeout":
+			cfg.AuthClientTimeout, err = parseTimeout(value)
 			if err != nil {
 				return
 			}

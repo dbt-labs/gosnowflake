@@ -57,10 +57,10 @@ func TestUnitPostAuth(t *testing.T) {
 }
 
 // TestParseAccount verifies parseAccount:
-// - returns the input unchanged if no dot is present
-// - strips everything after the first dot (region or extra labels)
-// - if the second label is "global", also strips an external ID suffix
-//   after the last '-' in the account portion
+//   - returns the input unchanged if no dot is present
+//   - strips everything after the first dot (region or extra labels)
+//   - if the second label is "global", also strips an external ID suffix
+//     after the last '-' in the account portion
 func TestParseAccount(t *testing.T) {
 	tests := []struct {
 		name     string

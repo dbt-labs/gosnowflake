@@ -916,6 +916,11 @@ func buildSnowflakeConn(ctx context.Context, config Config) (*snowflakeConn, err
 			Timeout:   sc.cfg.JWTClientTimeout,
 			Transport: st,
 		},
+		AuthClient: &http.Client{
+			// non-JWT authentications take a different timeout
+			Timeout:   sc.cfg.AuthClientTimeout,
+			Transport: st,
+		},
 		TokenAccessor:       tokenAccessor,
 		LoginTimeout:        sc.cfg.LoginTimeout,
 		RequestTimeout:      sc.cfg.RequestTimeout,
