@@ -308,9 +308,6 @@ func DSN(cfg *Config) (dsn string, err error) {
 	if cfg.JWTClientTimeout != defaultJWTClientTimeout {
 		params.Add("jwtClientTimeout", strconv.FormatInt(int64(cfg.JWTClientTimeout/time.Second), 10))
 	}
-	if cfg.AuthClientTimeout != defaultAuthClientTimeout {
-		params.Add("authClientTimeout", strconv.FormatInt(int64(cfg.AuthClientTimeout/time.Second), 10))
-	}
 	if cfg.LoginTimeout != defaultLoginTimeout {
 		params.Add("loginTimeout", strconv.FormatInt(int64(cfg.LoginTimeout/time.Second), 10))
 	}
