@@ -95,11 +95,11 @@ func (sr *snowflakeRestful) getFullURL(path string, params *url.Values) *url.URL
 	return ret
 }
 
+// Use this only to get a Client to send authentication requests
+//
 // We use a dedicated client for JWT auth (because if token processing takes
 // too long the token may be already expired) and a separate dedicated client
-// for all other authentication requests (so the per-HTTP-attempt timeout for
-// auth can be tightened without affecting query timeouts). The query path
-// keeps the original Client.
+// for all other authentication requests
 func (sr *snowflakeRestful) getClientFor(authType AuthType) *http.Client {
 	switch authType {
 	case AuthTypeJwt:
