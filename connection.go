@@ -917,11 +917,7 @@ func buildSnowflakeConn(ctx context.Context, config Config) (*snowflakeConn, err
 			Transport: st,
 		},
 		AuthClient: &http.Client{
-			// Per-HTTP-attempt timeout for non-JWT authentication (warehouse
-			// password, native OAuth, MFA, SSO, PAT, external browser, etc.).
-			// Allows callers to bound auth roundtrips without also bounding
-			// query roundtrips, mirroring `snowflake-connector-python`'s
-			// `requests` per-call timeout for auth requests.
+			// non-JWT authentications take a different timeout
 			Timeout:   sc.cfg.AuthClientTimeout,
 			Transport: st,
 		},

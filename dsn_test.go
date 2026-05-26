@@ -1958,7 +1958,7 @@ func TestDSN(t *testing.T) {
 		},
 		{
 			cfg: &Config{
-				User:             "u",
+				User:              "u",
 				Password:          "p",
 				Account:           "a.b.c",
 				ClientTimeout:     400 * time.Second,

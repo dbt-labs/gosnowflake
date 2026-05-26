@@ -18,9 +18,12 @@ import (
 )
 
 const (
-	defaultClientTimeout          = 900 * time.Second // Timeout for network round trip + read out http response
-	defaultJWTClientTimeout       = 10 * time.Second  // Timeout for network round trip + read out http response but used for JWT auth
-	defaultAuthClientTimeout      = 60 * time.Second  // Timeout for network round trip + read out http response used for non-JWT authentication requests
+	defaultClientTimeout    = 900 * time.Second // Timeout for network round trip + read out http response
+	defaultJWTClientTimeout = 10 * time.Second  // Timeout for network round trip + read out http response but used for JWT auth
+	// Timeout for network round trip + read out http response used for non-JWT authentication requests
+	// Mirrors  mirroring http socket timeout used in the `snowflake-connector-python`
+	// reference: https://github.com/snowflakedb/snowflake-connector-python/blob/d1251d9f01bbf06b4b58d09f81d5e0717cc546be/src/snowflake/connector/network.py#L1090
+	defaultAuthClientTimeout      = 60 * time.Second
 	defaultLoginTimeout           = 300 * time.Second // Timeout for retry for login EXCLUDING clientTimeout
 	defaultRequestTimeout         = 0 * time.Second   // Timeout for retry for request EXCLUDING clientTimeout
 	defaultJWTTimeout             = 60 * time.Second
@@ -102,8 +105,7 @@ type Config struct {
 	// Deprecated: timeouts may be reorganized in a future release.
 	ClientTimeout time.Duration // Timeout for network round trip + read out http response
 	// Deprecated: timeouts may be reorganized in a future release.
-	JWTClientTimeout time.Duration // Timeout for network round trip + read out http response used when JWT token auth is taking place
-	// Deprecated: timeouts may be reorganized in a future release.
+	JWTClientTimeout  time.Duration // Timeout for network round trip + read out http response used when JWT token auth is taking place
 	AuthClientTimeout time.Duration // Timeout for network round trip + read out http response used for non-JWT authentication requests
 	// Deprecated: timeouts may be reorganized in a future release.
 	ExternalBrowserTimeout time.Duration // Timeout for external browser login

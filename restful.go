@@ -105,10 +105,7 @@ func (sr *snowflakeRestful) getClientFor(authType AuthType) *http.Client {
 	case AuthTypeJwt:
 		return sr.JWTClient
 	default:
-		if sr.AuthClient != nil {
-			return sr.AuthClient
-		}
-		return sr.Client
+		return sr.AuthClient
 	}
 }
 
