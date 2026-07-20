@@ -4,6 +4,10 @@
 
 Bug fixes:
 
+- Fixed a panic when a corrupt OCSP cache key is encountered in the remote cache server or local cache file (snowflakedb/gosnowflake#1819).
+
+Bug fixes:
+
 - Handle HTTP307 & 308 in drivers to achieve better resiliency to backend errors (snowflakedb/gosnowflake#1616).
 
 - Fix unsafe reflection of nil pointer on DECFLOAT func in bind uploader (snowflakedb/gosnowflake#1604).
