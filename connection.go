@@ -526,6 +526,11 @@ func (sc *snowflakeConn) GetQueryStatus(
 // ipc stream of bytes. This way consumers don't need to be using the exact
 // same version of Arrow as the connection is using internally in order
 // to consume Arrow data.
+//
+// The server may respond with Arrow IPC or JSON depending on the statement
+// type (e.g. CALL, SHOW). The returned loader also implements
+// QueryResultFormatProvider; callers should check the format before passing
+// batch streams to ipc.NewReader.
 func (sc *snowflakeConn) QueryArrowStream(ctx context.Context, query string, bindings ...driver.NamedValue) (ArrowStreamLoader, error) {
 	ctx = WithArrowBatches(context.WithValue(ctx, asyncMode, false))
 	ctx = setResultType(ctx, queryResultType)
@@ -565,8 +570,9 @@ func (sc *snowflakeConn) QueryArrowStream(ctx context.Context, query string, bin
 			JSON:         data.Data.RowSet,
 			RowSetBase64: data.Data.RowSetBase64,
 		},
-		queryID:   data.Data.QueryID,
-		resultIDs: resultIDs,
+		queryID:           data.Data.QueryID,
+		resultIDs:         resultIDs,
+		queryResultFormat: data.Data.QueryResultFormat,
 	}
 	// if multistatement is used, we need to set the first result set to actual result set, not the aggregated response
 	if scd.hasNextResultSet() {
@@ -574,12 +580,15 @@ func (sc *snowflakeConn) QueryArrowStream(ctx context.Context, query string, bin
 			return nil, err
 		}
 	}
+
+	logger.WithContext(ctx).Debugf("QueryArrowStream: server returned resultset in %q format.", scd.queryResultFormat)
 	return scd, nil
 }
 
 // ArrowStreamBatch is a type describing a potentially yet-to-be-downloaded
-// Arrow IPC stream. Call `GetStream` to download and retrieve an io.Reader
-// that can be used with ipc.NewReader to get record batch results.
+// chunk of query result data. The content format depends on the current
+// QueryResultFormat: Arrow IPC record batches (use ipc.NewReader) when
+// the format is "arrow", or JSON (row fragments) when it is "json".
 type ArrowStreamBatch struct {
 	idx     int
 	numrows int64
@@ -679,9 +688,10 @@ func (asb *ArrowStreamBatch) downloadChunkStreamHelper(ctx context.Context) erro
 	return nil
 }
 
-// GetStream returns a stream of bytes consisting of an Arrow IPC Record
-// batch stream. Close should be called on the returned stream when done
-// to ensure no leaked memory.
+// GetStream downloads the chunk (if not already cached) and returns a
+// stream of bytes. The content may be Arrow IPC or JSON (row fragments)
+// depending on the current QueryResultFormat. Close should be called
+// on the returned stream when done to ensure no leaked memory.
 func (asb *ArrowStreamBatch) GetStream(ctx context.Context) (io.ReadCloser, error) {
 	if asb.rr == nil {
 		if err := asb.downloadChunkStreamHelper(ctx); err != nil {
@@ -696,10 +706,12 @@ func (asb *ArrowStreamBatch) GetStream(ctx context.Context) (io.ReadCloser, erro
 // Snowflake results via multiple Arrow Record Batch streams.
 //
 // Some queries from Snowflake do not return Arrow data regardless
-// of the settings, such as "SHOW WAREHOUSES". In these cases,
-// you'll find TotalRows() > 0 but GetBatches returns no batches
-// and no errors. In this case, the data is accessible via JSONData
-// with the actual types matching up to the metadata in RowTypes.
+// of the settings, such as "SHOW WAREHOUSES" or SQL stored procedures
+// using CALL with RETURNS TABLE(). In these cases the server returns
+// JSON even though the client requested Arrow. Small JSON results are
+// accessible via JSONData(); column metadata is available via RowTypes().
+//
+// To determine the actual response format, use QueryResultFormatProvider.
 type ArrowStreamLoader interface {
 	// GetBatches returns the result for the current result set, if response was Arrow.
 	// If multistatement is used, this returns the batches for the current result set.
@@ -721,16 +733,31 @@ type ArrowStreamLoader interface {
 	QueryID() string
 }
 
+// QueryResultFormatProvider is an optional interface that an
+// ArrowStreamLoader may implement to expose the server-reported result
+// format. The returned value is typically "arrow" or "json".
+// Callers should check the format before interpreting data from
+// GetBatches, as the batch content may be Arrow IPC or JSON depending
+// on the statement type.
+//
+//	if p, ok := loader.(QueryResultFormatProvider); ok {
+//	    fmt.Println(p.QueryResultFormat())
+//	}
+type QueryResultFormatProvider interface {
+	QueryResultFormat() string
+}
+
 type snowflakeArrowStreamChunkDownloader struct {
-	sc          *snowflakeConn
-	ChunkMetas  []execResponseChunk
-	Total       int64
-	Qrmk        string
-	ChunkHeader map[string]string
-	FuncGet     func(context.Context, *snowflakeConn, string, map[string]string, time.Duration) (*http.Response, error)
-	RowSet      rowSetType
-	resultIDs   []string
-	queryID     string
+	sc                *snowflakeConn
+	ChunkMetas        []execResponseChunk
+	Total             int64
+	Qrmk              string
+	ChunkHeader       map[string]string
+	FuncGet           func(context.Context, *snowflakeConn, string, map[string]string, time.Duration) (*http.Response, error)
+	RowSet            rowSetType
+	resultIDs         []string
+	queryID           string
+	queryResultFormat string
 }
 
 func (scd *snowflakeArrowStreamChunkDownloader) Location() *time.Location {
@@ -748,6 +775,15 @@ func (scd *snowflakeArrowStreamChunkDownloader) JSONData() [][]*string {
 }
 func (scd *snowflakeArrowStreamChunkDownloader) QueryID() string {
 	return scd.queryID
+}
+
+// QueryResultFormat returns the server-reported result format for the
+// current result set (typically "arrow" or "json"). Callers should
+// check this before interpreting batch streams from GetBatches, as
+// the content may be Arrow IPC or JSON depending on the statement type.
+// The value is updated on each NextResultSet call.
+func (scd *snowflakeArrowStreamChunkDownloader) QueryResultFormat() string {
+	return scd.queryResultFormat
 }
 
 // the server might have had an empty first batch, check if we can decode
@@ -852,6 +888,7 @@ func (scd *snowflakeArrowStreamChunkDownloader) NextResultSet(ctx context.Contex
 	scd.Total = resp.Data.Total
 	scd.Qrmk = resp.Data.Qrmk
 	scd.ChunkHeader = resp.Data.ChunkHeaders
+	scd.queryResultFormat = resp.Data.QueryResultFormat
 	scd.RowSet = rowSetType{
 		RowType:      resp.Data.RowType,
 		JSON:         resp.Data.RowSet,
