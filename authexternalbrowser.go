@@ -298,18 +298,19 @@ func doAuthenticateByExternalBrowser(
 	}
 
 	// Invoke SAML response provider (either auto-launch or manual token flow)
-	manualToken, err := defaultSamlResponseProvider().run(loginURL)
-	if err != nil {
-		return authenticateByExternalBrowserResult{nil, nil, err}
-	}
+	_, err = defaultSamlResponseProvider().run(loginURL)
 
 	// TODO(versusfacit): Upstream now uses caller indirection. Preserve branching here
 	// until we unify upstream flow handling.
-	if manualToken != "" {
-		// We're in manual/pasted path, skip listener
-		// Listener not needed; close it so Snowflake cannot connect.
+	if err != nil {
+		// We're in manual/pasted path, skip listener.
+		// An open listener would catch the forwarded redirect (dev containers) and hang, so close it before the manual fallback below.
 		_ = l.Close()
 
+		manualToken, err := manualTokenFallback()
+		if err != nil {
+			return authenticateByExternalBrowserResult{nil, nil, err}
+		}
 		unescaped, err := url.QueryUnescape(manualToken)
 		if err != nil {
 			return authenticateByExternalBrowserResult{nil, nil, err}
@@ -461,7 +462,8 @@ func (e externalBrowserSamlResponseProvider) run(loginURL string) (string, error
 	// TODO: Figure out how to migrate logging to use context once run() includes ctx
 	logger.Info("Initiating login request in browser with your identity provider.")
 
-	if err := openBrowser(loginURL); err == nil {
+	err := openBrowser(loginURL)
+	if err == nil {
 		// ---- AUTOMATIC PATH
 		// Browser successfully opened. Listener will capture the redirect downstream.
 		return "", nil
@@ -480,12 +482,7 @@ the URL you were finally redirected to here.
 `, loginURL)
 	fmt.Printf("\n")
 
-	token, perr := manualTokenFallback()
-	if perr != nil {
-		return "", perr
-	}
-
-	return token, nil
+	return "", err
 }
 
 var defaultSamlResponseProvider = func() samlResponseProvider {
