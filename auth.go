@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sferrors "github.com/snowflakedb/gosnowflake/v2/internal/errors"
@@ -357,15 +359,48 @@ func authenticate(
 	}
 	logger.WithContext(ctx).Info("Authentication SUCCESS")
 	sc.rest.TokenAccessor.SetTokens(respd.Data.Token, respd.Data.MasterToken, respd.Data.SessionID)
-	if sessionParameters[clientRequestMfaToken] == true {
-		token := respd.Data.MfaToken
-		credentialsStorage.setCredential(newMfaTokenSpec(sc.cfg), token)
+	if shouldCacheMfaToken(sc.cfg.Authenticator, sessionParameters) {
+		credentialsStorage.setCredential(newMfaTokenSpec(sc.cfg), respd.Data.MfaToken)
 	}
-	if sessionParameters[clientStoreTemporaryCredential] == true {
-		token := respd.Data.IDToken
-		credentialsStorage.setCredential(newIDTokenSpec(sc.cfg), token)
+	if shouldCacheIDToken(sc.cfg.Authenticator, sessionParameters, respd.Data.IDToken) {
+		credentialsStorage.setCredential(newIDTokenSpec(sc.cfg), respd.Data.IDToken)
 	}
 	return &respd.Data, nil
+}
+
+// shouldCacheMfaToken reports whether a successful login may write the MFA token
+// cache slot.
+//
+// dbt-only: upstream checks only the session parameter. The slot belongs to
+// AuthTypeUsernamePasswordMFA, and ClientRequestMfaToken can be set on any
+// authenticator, so the flow must be checked too.
+func shouldCacheMfaToken(authenticator AuthType, sessionParameters map[string]any) bool {
+	return sessionParameters[clientRequestMfaToken] == true && authenticator == AuthTypeUsernamePasswordMFA
+}
+
+// shouldCacheIDToken reports whether a successful login may write the ID token
+// cache slot.
+//
+// dbt-only: upstream checks only the session parameter, which is enabled for
+// AuthTypeExternalBrowser and both OAuth flows alike — so an OAuth login would
+// write its absent ID token over the browser flow's cached one. An empty token is
+// likewise refused: a successful login does not always carry one, and storing ""
+// evicts a valid entry and forces a needless browser tab on the next connect.
+func shouldCacheIDToken(authenticator AuthType, sessionParameters map[string]any, idToken string) bool {
+	return sessionParameters[clientStoreTemporaryCredential] == true && authenticator == AuthTypeExternalBrowser && idToken != ""
+}
+
+// dbt-only. Named so the switch below can re-assert it inside the case body,
+// which a fallthrough enters without evaluating the guard.
+func isOAuthRefreshable(err error) bool {
+	var se *SnowflakeError
+	return errors.As(err, &se) && slices.Contains(refreshOAuthTokenErrorCodes, strconv.Itoa(se.Number))
+}
+
+// dbt-only. A failure while presenting a cached ID token most likely means the
+// token expired; without one, the failure is genuine.
+func shouldRetryWithFreshExternalBrowserLogin(authenticator AuthType, cachedIDToken string) bool {
+	return authenticator == AuthTypeExternalBrowser && cachedIDToken != ""
 }
 
 func newAuthRequestClientEnvironment() authRequestClientEnvironment {
@@ -659,6 +694,58 @@ func (s *oauthTokenSpec) lockID() string {
 	return s.idp + "|" + s.snowflake + "|" + s.username + "|" + s.role + "|" + string(s.tokenType)
 }
 
+// External-browser failure backoff. dbt-only: not upstream.
+//
+// An IP restriction or misconfigured IDP fails every attempt, and each attempt
+// opens a browser tab, so a reconnecting pool produces a storm of tabs at a page
+// the user cannot get past. Process-global because the tabs it prevents are a
+// property of the machine's display, not of one connection.
+var lastFail sync.Map // backoff key -> time.Time at which the refusal expires
+
+const extBrowserBackoffWindow = 60 * time.Second
+
+// Accepts a bare host, host:port, or full URL, since Config.Host may hold any of
+// the three depending on how the config was built.
+func normalizeHost(h string) string {
+	if strings.HasPrefix(h, "http://") || strings.HasPrefix(h, "https://") {
+		if u, err := url.Parse(h); err == nil && u != nil && u.Host != "" {
+			h = u.Host
+		}
+	}
+	if hostOnly, _, err := net.SplitHostPort(h); err == nil {
+		h = hostOnly
+	}
+	return strings.ToLower(h)
+}
+
+// User is upper-cased because Snowflake login names are case-insensitive, so
+// differing spellings must not each get their own tab budget.
+func extBrowserBackoffKey(host, user string) string {
+	return normalizeHost(host) + "|" + strings.ToUpper(user)
+}
+
+// Prunes an expired entry as a side effect. Takes now rather than calling
+// time.Now so the window is testable without sleeping.
+func extBrowserBackoffActive(key string, now time.Time) bool {
+	value, ok := lastFail.Load(key)
+	if !ok {
+		return false
+	}
+	if until, ok := value.(time.Time); ok && now.Before(until) {
+		return true
+	}
+	lastFail.Delete(key)
+	return false
+}
+
+func recordExtBrowserFailure(key string, now time.Time) {
+	lastFail.Store(key, now.Add(extBrowserBackoffWindow))
+}
+
+func clearExtBrowserFailure(key string) {
+	lastFail.Delete(key)
+}
+
 func authenticateWithConfig(sc *snowflakeConn) error {
 	var authData *authResponseMain
 	var samlResponse []byte
@@ -667,9 +754,12 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 
 	mfaTokenLockKey := newMfaTokenSpec(sc.cfg)
 	idTokenLockKey := newIDTokenSpec(sc.cfg)
+	extBrowserKey := extBrowserBackoffKey(sc.cfg.Host, sc.cfg.User)
 
 	if sc.cfg.Authenticator == AuthTypeExternalBrowser || sc.cfg.Authenticator == AuthTypeOAuthAuthorizationCode || sc.cfg.Authenticator == AuthTypeOAuthClientCredentials {
-		if (runtime.GOOS == "windows" || runtime.GOOS == "darwin") && sc.cfg.ClientStoreTemporaryCredential == sfconfig.BoolNotSet {
+		// dbt-only: upstream gates on the platforms that have a keyring. dbt uses
+		// the file cache on all three, so the gate follows the storage layer.
+		if isCacheSupportedGOOS(runtime.GOOS) && sc.cfg.ClientStoreTemporaryCredential == sfconfig.BoolNotSet {
 			sc.cfg.ClientStoreTemporaryCredential = ConfigBoolTrue
 		}
 		if sc.cfg.Authenticator == AuthTypeExternalBrowser {
@@ -695,7 +785,10 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 	}
 
 	if sc.cfg.Authenticator == AuthTypeUsernamePasswordMFA {
-		if (runtime.GOOS == "windows" || runtime.GOOS == "darwin") && sc.cfg.ClientRequestMfaToken == sfconfig.BoolNotSet {
+		// dbt-only: The fork changed only the ID-token gate and left this
+		// one on the keyring platforms, so MFA caching silently stayed off on linux
+		// while ID-token caching was on. Same predicate, so same answer.
+		if isCacheSupportedGOOS(runtime.GOOS) && sc.cfg.ClientRequestMfaToken == sfconfig.BoolNotSet {
 			sc.cfg.ClientRequestMfaToken = ConfigBoolTrue
 		}
 		if isEligibleForParallelLogin(sc.cfg, sc.cfg.ClientRequestMfaToken) {
@@ -718,6 +811,10 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 	switch sc.cfg.Authenticator {
 	case AuthTypeExternalBrowser:
 		if sc.idToken == "" {
+			if extBrowserBackoffActive(extBrowserKey, time.Now()) {
+				sc.cleanup()
+				return errors.New("External browser sign-in failed recently due to an unrecoverable authentication failure (e.g., IP restriction, IDP error)")
+			}
 			samlResponse, proofKey, err = authenticateByExternalBrowser(
 				sc.ctx,
 				sc.rest,
@@ -739,19 +836,68 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 		samlResponse,
 		proofKey)
 	if err != nil {
-		var se *SnowflakeError
-		if errors.As(err, &se) && slices.Contains(refreshOAuthTokenErrorCodes, strconv.Itoa(se.Number)) {
-			credentialsStorage.deleteCredential(newOAuthAccessTokenSpec(sc.cfg))
-
-			if sc.cfg.Authenticator == AuthTypeOAuthAuthorizationCode {
-				doRefreshTokenWithLock(sc)
-			}
-
-			// if refreshing succeeds for authorization code, we will take a token from cache
-			// if it fails, we will just run the full flow
-			authData, err = authenticate(sc.ctx, sc, nil, nil)
+		// dbt-only: a cancelled context is not a credential problem. Return before
+		// discarding a cached token or opening a tab.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			sc.cleanup()
+			return err
 		}
-		if err != nil {
+		switch {
+		// dbt-only: the cached ID token was rejected. Discard it and try one
+		// interactive login.
+		//
+		// TODO: not gated on the backoff, matching the fork. A connection holding a
+		// stale token skips the gate above, so a pool of them can each open a tab
+		// past an active backoff. Consider gating once the lease lands and the
+		// escalate-vs-terminate signal is settled.
+		case shouldRetryWithFreshExternalBrowserLogin(sc.cfg.Authenticator, sc.idToken):
+			credentialsStorage.deleteCredential(newIDTokenSpec(sc.cfg))
+			sc.idToken = ""
+			samlResponse, proofKey, err = authenticateByExternalBrowser(
+				sc.ctx,
+				sc.rest,
+				sc.cfg.Authenticator.String(),
+				sc.cfg.Application,
+				sc.cfg.Account,
+				sc.cfg.User,
+				sc.cfg.ExternalBrowserTimeout,
+				sc.cfg.DisableConsoleLogin)
+			if err != nil {
+				sc.cleanup() // sign-in did not complete; stays retryable, no backoff
+				return err
+			}
+			authData, err = authenticate(sc.ctx, sc, samlResponse, proofKey)
+			if err == nil {
+				break
+			}
+			fallthrough
+
+		case isOAuthRefreshable(err):
+			// Re-asserted: a fallthrough from above enters here without evaluating
+			// the guard.
+			if isOAuthRefreshable(err) {
+				credentialsStorage.deleteCredential(newOAuthAccessTokenSpec(sc.cfg))
+
+				if sc.cfg.Authenticator == AuthTypeOAuthAuthorizationCode {
+					doRefreshTokenWithLock(sc)
+				}
+
+				// if refreshing succeeds for authorization code, we will take a token from cache
+				// if it fails, we will just run the full flow
+				authData, err = authenticate(sc.ctx, sc, nil, nil)
+			}
+			if err == nil {
+				break
+			}
+			fallthrough
+
+		default:
+			// The early return above only sees the first authenticate; a retry above
+			// can surface its own cancellation, which must not cost a backoff.
+			if sc.cfg.Authenticator == AuthTypeExternalBrowser &&
+				!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				recordExtBrowserFailure(extBrowserKey, time.Now())
+			}
 			sc.cleanup()
 			return err
 		}
@@ -764,6 +910,7 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 		valueAwaiter := valueAwaitHolder.get(idTokenLockKey)
 		valueAwaiter.done()
 	}
+	clearExtBrowserFailure(extBrowserKey)
 	sc.populateSessionParameters(authData.Parameters)
 	sc.configureTelemetry()
 	sc.ctx = context.WithValue(sc.ctx, SFSessionIDKey, authData.SessionID)

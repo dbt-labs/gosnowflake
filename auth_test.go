@@ -1358,3 +1358,363 @@ func TestParseAccount(t *testing.T) {
 		})
 	}
 }
+
+// Credential-cache write guards, extracted from authenticate() so they are
+// reachable without driving that whole function. Ported from dbt fork commits
+// e2a04f6 "Ensure all operating systems use externalbrowser. Protect IDToken."
+// and 268d1bb "Restore MFA caching behavior."
+func TestShouldCacheMfaToken(t *testing.T) {
+	testcases := []struct {
+		name              string
+		authenticator     AuthType
+		sessionParameters map[string]any
+		expected          bool
+	}{
+		{
+			name:              "username-password-mfa with the session parameter set",
+			authenticator:     AuthTypeUsernamePasswordMFA,
+			sessionParameters: map[string]any{clientRequestMfaToken: true},
+			expected:          true,
+		},
+		{
+			name:              "username-password-mfa without the session parameter",
+			authenticator:     AuthTypeUsernamePasswordMFA,
+			sessionParameters: map[string]any{},
+			expected:          false,
+		},
+		{
+			// ClientRequestMfaToken is settable on any authenticator; only the MFA
+			// flow owns this cache slot.
+			name:              "plain snowflake auth may not write the mfa slot",
+			authenticator:     AuthTypeSnowflake,
+			sessionParameters: map[string]any{clientRequestMfaToken: true},
+			expected:          false,
+		},
+		{
+			name:              "external browser may not write the mfa slot",
+			authenticator:     AuthTypeExternalBrowser,
+			sessionParameters: map[string]any{clientRequestMfaToken: true},
+			expected:          false,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertEqualE(t, shouldCacheMfaToken(tc.authenticator, tc.sessionParameters), tc.expected)
+		})
+	}
+}
+
+func TestShouldCacheIDToken(t *testing.T) {
+	testcases := []struct {
+		name              string
+		authenticator     AuthType
+		sessionParameters map[string]any
+		idToken           string
+		expected          bool
+	}{
+		{
+			name:              "external browser with a token",
+			authenticator:     AuthTypeExternalBrowser,
+			sessionParameters: map[string]any{clientStoreTemporaryCredential: true},
+			idToken:           "id-token",
+			expected:          true,
+		},
+		{
+			// The regression this guard exists for: a successful login that
+			// reports no ID token must not evict a good cached one.
+			name:              "external browser with an empty token",
+			authenticator:     AuthTypeExternalBrowser,
+			sessionParameters: map[string]any{clientStoreTemporaryCredential: true},
+			idToken:           "",
+			expected:          false,
+		},
+		{
+			name:              "external browser with temporary credentials disabled",
+			authenticator:     AuthTypeExternalBrowser,
+			sessionParameters: map[string]any{},
+			idToken:           "id-token",
+			expected:          false,
+		},
+		{
+			// clientStoreTemporaryCredential is enabled for both OAuth flows too,
+			// so without the authenticator check an OAuth login would clobber the
+			// browser flow's cached ID token.
+			name:              "oauth authorization code may not write the id token slot",
+			authenticator:     AuthTypeOAuthAuthorizationCode,
+			sessionParameters: map[string]any{clientStoreTemporaryCredential: true},
+			idToken:           "id-token",
+			expected:          false,
+		},
+		{
+			name:              "oauth client credentials may not write the id token slot",
+			authenticator:     AuthTypeOAuthClientCredentials,
+			sessionParameters: map[string]any{clientStoreTemporaryCredential: true},
+			idToken:           "id-token",
+			expected:          false,
+		},
+		{
+			name:              "username-password-mfa may not write the id token slot",
+			authenticator:     AuthTypeUsernamePasswordMFA,
+			sessionParameters: map[string]any{clientStoreTemporaryCredential: true},
+			idToken:           "id-token",
+			expected:          false,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertEqualE(t, shouldCacheIDToken(tc.authenticator, tc.sessionParameters, tc.idToken), tc.expected)
+		})
+	}
+}
+
+// External-browser failure backoff (dbt-only). Ported from fork commit 7d40694
+// "Less tab storms through smarter failures". Not yet wired into
+// authenticateWithConfig; that is a separate change.
+
+func TestNormalizeHost(t *testing.T) {
+	testcases := []struct {
+		name     string
+		host     string
+		expected string
+	}{
+		{
+			name:     "bare host is unchanged",
+			host:     "abc.snowflakecomputing.com",
+			expected: "abc.snowflakecomputing.com",
+		},
+		{
+			name:     "host is lowercased",
+			host:     "ABC.SnowflakeComputing.COM",
+			expected: "abc.snowflakecomputing.com",
+		},
+		{
+			name:     "port is stripped",
+			host:     "abc.snowflakecomputing.com:443",
+			expected: "abc.snowflakecomputing.com",
+		},
+		{
+			name:     "https scheme is stripped",
+			host:     "https://abc.snowflakecomputing.com",
+			expected: "abc.snowflakecomputing.com",
+		},
+		{
+			name:     "http scheme and port are both stripped",
+			host:     "http://abc.snowflakecomputing.com:443",
+			expected: "abc.snowflakecomputing.com",
+		},
+		{
+			name:     "path after the host is discarded",
+			host:     "https://ABC.snowflakecomputing.com:443/some/path",
+			expected: "abc.snowflakecomputing.com",
+		},
+		{
+			name:     "empty host is unchanged",
+			host:     "",
+			expected: "",
+		},
+		{
+			name:     "ipv6 literal with a port",
+			host:     "[::1]:443",
+			expected: "::1",
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertEqualE(t, normalizeHost(tc.host), tc.expected)
+		})
+	}
+}
+
+// The backoff must not be evadable by spelling the same account or user
+// differently.
+func TestExtBrowserBackoffKey(t *testing.T) {
+	t.Run("equivalent spellings collapse to one key", func(t *testing.T) {
+		canonical := extBrowserBackoffKey("abc.snowflakecomputing.com", "USER")
+		for _, variant := range []struct {
+			host string
+			user string
+		}{
+			{"ABC.snowflakecomputing.com", "USER"},
+			{"abc.snowflakecomputing.com:443", "USER"},
+			{"https://abc.snowflakecomputing.com", "USER"},
+			{"https://ABC.snowflakecomputing.com:443", "user"},
+			{"abc.snowflakecomputing.com", "User"},
+		} {
+			assertEqualE(t, extBrowserBackoffKey(variant.host, variant.user), canonical,
+				"host "+variant.host+" user "+variant.user+" should share the canonical key")
+		}
+	})
+
+	t.Run("different principals get different keys", func(t *testing.T) {
+		base := extBrowserBackoffKey("abc.snowflakecomputing.com", "user")
+		assertNotEqualE(t, extBrowserBackoffKey("xyz.snowflakecomputing.com", "user"), base,
+			"a different host must not share a backoff window")
+		assertNotEqualE(t, extBrowserBackoffKey("abc.snowflakecomputing.com", "other"), base,
+			"a different user must not share a backoff window")
+	})
+}
+
+func TestExtBrowserBackoffLifecycle(t *testing.T) {
+	now := time.Now()
+
+	t.Run("no entry means not backed off", func(t *testing.T) {
+		key := extBrowserBackoffKey("fresh."+t.Name(), "u")
+		assertFalseE(t, extBrowserBackoffActive(key, now))
+	})
+
+	t.Run("a recorded failure refuses within the window", func(t *testing.T) {
+		key := extBrowserBackoffKey("recorded."+t.Name(), "u")
+		defer clearExtBrowserFailure(key)
+
+		recordExtBrowserFailure(key, now)
+		assertTrueE(t, extBrowserBackoffActive(key, now), "should refuse immediately after the failure")
+		assertTrueE(t, extBrowserBackoffActive(key, now.Add(extBrowserBackoffWindow-time.Second)),
+			"should still refuse just before the window closes")
+	})
+
+	t.Run("the refusal lapses once the window closes", func(t *testing.T) {
+		key := extBrowserBackoffKey("lapsed."+t.Name(), "u")
+		defer clearExtBrowserFailure(key)
+
+		recordExtBrowserFailure(key, now)
+		assertFalseE(t, extBrowserBackoffActive(key, now.Add(extBrowserBackoffWindow)),
+			"should allow once the window has elapsed")
+	})
+
+	t.Run("an expired entry is pruned when it is checked", func(t *testing.T) {
+		key := extBrowserBackoffKey("pruned."+t.Name(), "u")
+		defer clearExtBrowserFailure(key)
+
+		recordExtBrowserFailure(key, now)
+		_, present := lastFail.Load(key)
+		assertTrueE(t, present, "entry should exist before it is checked")
+
+		extBrowserBackoffActive(key, now.Add(2*extBrowserBackoffWindow))
+		_, present = lastFail.Load(key)
+		assertFalseE(t, present, "checking an expired entry should remove it")
+	})
+
+	t.Run("a success clears the refusal immediately", func(t *testing.T) {
+		key := extBrowserBackoffKey("cleared."+t.Name(), "u")
+		defer clearExtBrowserFailure(key)
+
+		recordExtBrowserFailure(key, now)
+		clearExtBrowserFailure(key)
+		assertFalseE(t, extBrowserBackoffActive(key, now), "a cleared key must not refuse")
+	})
+
+	t.Run("a refusal is scoped to its own key", func(t *testing.T) {
+		failing := extBrowserBackoffKey("scoped-failing."+t.Name(), "u")
+		other := extBrowserBackoffKey("scoped-other."+t.Name(), "u")
+		defer clearExtBrowserFailure(failing)
+
+		recordExtBrowserFailure(failing, now)
+		assertFalseE(t, extBrowserBackoffActive(other, now), "an unrelated key must be unaffected")
+	})
+}
+
+// Ported from dbt fork commit 144d002, restructured: the fork chains this into the
+// OAuth refresh branch with fallthrough, which skips that branch's guard.
+func TestShouldRetryWithFreshExternalBrowserLogin(t *testing.T) {
+	testcases := []struct {
+		name          string
+		authenticator AuthType
+		cachedIDToken string
+		expected      bool
+	}{
+		{
+			name:          "external browser that presented a cached token",
+			authenticator: AuthTypeExternalBrowser,
+			cachedIDToken: "stale-id-token",
+			expected:      true,
+		},
+		{
+			name:          "external browser with no cached token",
+			authenticator: AuthTypeExternalBrowser,
+			cachedIDToken: "",
+			expected:      false,
+		},
+		{
+			name:          "oauth authorization code is handled by the refresh path",
+			authenticator: AuthTypeOAuthAuthorizationCode,
+			cachedIDToken: "stale-id-token",
+			expected:      false,
+		},
+		{
+			name:          "username-password-mfa never opens a browser",
+			authenticator: AuthTypeUsernamePasswordMFA,
+			cachedIDToken: "stale-id-token",
+			expected:      false,
+		},
+		{
+			name:          "plain snowflake auth never opens a browser",
+			authenticator: AuthTypeSnowflake,
+			cachedIDToken: "stale-id-token",
+			expected:      false,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertEqualE(t, shouldRetryWithFreshExternalBrowserLogin(tc.authenticator, tc.cachedIDToken), tc.expected)
+		})
+	}
+}
+
+func TestIsOAuthRefreshable(t *testing.T) {
+	testcases := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "missing access token but refresh token present",
+			err:      &SnowflakeError{Number: ErrMissingAccessATokenButRefreshTokenPresent},
+			expected: true,
+		},
+		{
+			name:     "invalid oauth access token",
+			err:      &SnowflakeError{Number: 390303},
+			expected: true,
+		},
+		{
+			name:     "expired oauth access token",
+			err:      &SnowflakeError{Number: 390318},
+			expected: true,
+		},
+		{
+			name:     "wrapped refreshable error",
+			err:      fmt.Errorf("login failed: %w", &SnowflakeError{Number: 390318}),
+			expected: true,
+		},
+		{
+			name:     "unrelated snowflake error",
+			err:      &SnowflakeError{Number: ErrCodeFailedToConnect},
+			expected: false,
+		},
+		{
+			name:     "plain error",
+			err:      errors.New("boom"),
+			expected: false,
+		},
+		{
+			name:     "context cancelled",
+			err:      context.Canceled,
+			expected: false,
+		},
+		{
+			name:     "nil error",
+			err:      nil,
+			expected: false,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertEqualE(t, isOAuthRefreshable(tc.err), tc.expected)
+		})
+	}
+}
