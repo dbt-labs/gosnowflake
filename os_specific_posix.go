@@ -8,6 +8,7 @@ import (
 	"golang.org/x/sys/unix"
 	"io"
 	"os"
+	"runtime"
 	"syscall"
 )
 
@@ -82,14 +83,31 @@ func validateFilePermissionBits(f *os.File, expectedPerm os.FileMode) error {
 	return nil
 }
 
-func getLocalAppDataPath() (string, error) {
-	panic("getLocalAppDataPath is not implemented for POSIX systems, only for Windows")
+// dbt-only: not upstream. Upstream only ever resolves the linux cache directory,
+// because it does not use the file cache on darwin.
+//
+// The trailing Credentials segment on darwin is deliberate: it allows 0700 on the
+// leaf directory without restricting all of Caches/Snowflake.
+var defaultMacCacheDirConf = []cacheDirConf{
+	{envVar: credCacheDirEnv, pathSegments: []string{}},
+	{envVar: "HOME", pathSegments: []string{"Library", "Caches", "Snowflake", "Credentials"}},
+}
+
+func credCacheDirPath() (string, error) {
+	if runtime.GOOS == "darwin" {
+		return buildCredCacheDirPath(defaultMacCacheDirConf)
+	}
+	return buildCredCacheDirPath(defaultLinuxCacheDirConf)
 }
 
 func marshalCredentialsData(cache map[string]any) ([]byte, error) {
 	// On POSIX systems, we rely on stricter permissions rather than
 	// encryption using the Windows DPAPI.
-	return json.Marshal(cache)
+	bytes, err := json.Marshal(cache)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal credential cache map. %w", err)
+	}
+	return bytes, nil
 }
 
 func unmarshalCredentialsData(data []byte) (map[string]any, error) {

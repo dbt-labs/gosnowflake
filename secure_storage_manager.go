@@ -181,7 +181,9 @@ type fileBasedSecureStorageManager struct {
 }
 
 func newFileBasedSecureStorageManager() (*fileBasedSecureStorageManager, error) {
-	credDirPath, err := buildCredCacheDirPath(defaultLinuxCacheDirConf)
+	// dbt-only: upstream hardcodes defaultLinuxCacheDirConf here, since it only
+	// uses the file cache on linux. credCacheDirPath is per-OS.
+	credDirPath, err := credCacheDirPath()
 	if err != nil {
 		return nil, err
 	}
@@ -206,15 +208,18 @@ func lookupCacheDir(envVar string, pathSegments ...string) (string, error) {
 		return "", fmt.Errorf("environment variable %s=%s is not a directory", envVar, envVal)
 	}
 
-	cacheDir := filepath.Join(envVal, filepath.Join(pathSegments...))
-	parentOfCacheDir := cacheDir[:strings.LastIndex(cacheDir, "/")]
+	return ensureCacheDir(filepath.Join(envVal, filepath.Join(pathSegments...)))
+}
 
-	if err = os.MkdirAll(parentOfCacheDir, os.FileMode(0755)); err != nil {
+// dbt-only: extracted so cache directories that do not come from an environment
+// variable — the Windows known-folder lookup — are created identically.
+func ensureCacheDir(cacheDir string) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(cacheDir), os.FileMode(0755)); err != nil {
 		return "", err
 	}
 
 	// We don't check if permissions are incorrect here if a directory exists, because we check it later.
-	if err = os.Mkdir(cacheDir, os.FileMode(0700)); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := os.Mkdir(cacheDir, os.FileMode(0700)); err != nil && !errors.Is(err, os.ErrExist) {
 		return "", err
 	}
 
@@ -495,10 +500,12 @@ func (ssm *fileBasedSecureStorageManager) readTemporaryCacheFile(cacheFile *os.F
 		return map[string]any{}, nil
 	}
 
-	credentialsMap := map[string]any{}
-	err = json.Unmarshal(jsonData, &credentialsMap)
+	// dbt-only: upstream calls json.Unmarshal directly. Per-OS so that windows can
+	// decrypt with the Data Protection API, which is its only protection — file
+	// permissions are near-meaningless there.
+	credentialsMap, err := unmarshalCredentialsData(jsonData)
 	if err != nil {
-		return map[string]any{}, fmt.Errorf("failed to unmarshal credential cache file. %v", err)
+		return map[string]any{}, err
 	}
 
 	return credentialsMap, nil
@@ -529,9 +536,10 @@ func (ssm *fileBasedSecureStorageManager) deleteCredential(tokenSpec secureToken
 }
 
 func (ssm *fileBasedSecureStorageManager) writeTemporaryCacheFile(cache map[string]any, cacheFile *os.File) error {
-	bytes, err := json.Marshal(cache)
+	// dbt-only: upstream calls json.Marshal directly. See readTemporaryCacheFile.
+	bytes, err := marshalCredentialsData(cache)
 	if err != nil {
-		return fmt.Errorf("failed to marshal credential cache map. %w", err)
+		return err
 	}
 
 	if err = cacheFile.Truncate(0); err != nil {

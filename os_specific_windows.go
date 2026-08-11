@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"syscall"
 	"unsafe"
 
@@ -86,6 +87,9 @@ var (
 
 // Return the path to a known folder for Windows [3].
 //
+// dbt-only: locates the credential cache directory on windows, unless
+// SF_TEMPORARY_CREDENTIAL_CACHE_DIR overrides it.
+//
 // The folderId argument should be the GUID for the known folder path [1].
 //
 // [1] https://learn.microsoft.com/en-us/windows/win32/shell/knownfolderid
@@ -118,6 +122,27 @@ func getKnownFolderPath(folderId syscall.GUID) (string, error) {
 
 func getLocalAppDataPath() (string, error) {
 	return getKnownFolderPath(FOLDERID_LocalAppData)
+}
+
+// dbt-only: not upstream. Upstream only ever resolves the linux cache directory,
+// because it does not use the file cache on windows.
+// Resolved in order: SF_TEMPORARY_CREDENTIAL_CACHE_DIR, the known-folder lookup,
+// then LOCALAPPDATA. The known-folder lookup precedes the environment variable
+// because it asks the OS directly; LOCALAPPDATA can be stale or overridden under
+// impersonation, runas and service accounts, so it is only a last resort.
+func credCacheDirPath() (string, error) {
+	if dir := os.Getenv(credCacheDirEnv); dir != "" {
+		return ensureCacheDir(dir)
+	}
+
+	base, err := getLocalAppDataPath()
+	if err != nil {
+		logger.Debugf("known folder lookup failed, falling back to LOCALAPPDATA. %v", err)
+		if base = os.Getenv("LOCALAPPDATA"); base == "" {
+			return "", fmt.Errorf("failed to get Local/AppData folder: %v", err)
+		}
+	}
+	return ensureCacheDir(filepath.Join(base, "Snowflake", "Credentials"))
 }
 
 func cryptProtectData(data []byte) ([]byte, error) {

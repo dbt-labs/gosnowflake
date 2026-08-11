@@ -9,17 +9,26 @@ import (
 	"github.com/99designs/keyring"
 )
 
+// dbt-only: upstream returns a keyring-based manager on darwin and windows. dbt
+// uses the file cache on every platform — the keyring backends prompt
+// interactively (macOS Keychain) and cannot be shared between processes the way
+// the lease-protected file cache can. Body mirrors the linux implementation.
 func defaultOsSpecificSecureStorageManager() secureStorageManager {
-	switch runtime.GOOS {
-	case "darwin", "windows":
-		logger.Debugf("OS is %v, using keyring based secure storage manager.", runtime.GOOS)
-		return &threadSafeSecureStorageManager{&sync.Mutex{}, newKeyringBasedSecureStorageManager()}
-	default:
+	if !isCacheSupportedGOOS(runtime.GOOS) {
 		logger.Debugf("OS %v does not support credentials cache", runtime.GOOS)
 		return newNoopSecureStorageManager()
 	}
+	logger.Debugf("OS is %v, using file based secure storage manager.", runtime.GOOS)
+	ssm, err := newFileBasedSecureStorageManager()
+	if err != nil {
+		logger.Debugf("failed to create credentials cache dir: %v. Not storing credentials locally.", err)
+		return newNoopSecureStorageManager()
+	}
+	return &threadSafeSecureStorageManager{&sync.Mutex{}, ssm}
 }
 
+// dbt-only: everything below is unreferenced and retained deliberately, to track
+// upstream rather than diverge. dbt never selects the keyring backend.
 type keyringSecureStorageManager struct {
 }
 

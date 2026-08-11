@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime" // dbt-only: used by the dbt test section at the end of this file
 	"testing"
 	"time"
 
@@ -592,4 +593,92 @@ func TestOAuthKeyHasFourFields(t *testing.T) {
 	key, err := spec.buildKey()
 	assertNilF(t, err)
 	assertEqualF(t, key, "SnowflakeTokenCache.v2.OAUTH_ACCESS_TOKEN."+expectedHash)
+}
+
+// ---------------------------------------------------------------------------
+// dbt-only tests. Not upstream.
+//
+// Characterization tests for the credential-cache behaviour dbt requires.
+// Tests asserting behaviour that is not yet ported are skipped with an explicit
+// unskip condition; together those skips are the remaining port checklist.
+// ---------------------------------------------------------------------------
+
+// Upstream selects the credential store by build tag: file-based on linux,
+// keyring on darwin/windows. dbt requires file-based everywhere, because the
+// keyring backends prompt interactively (macOS Keychain) and cannot be shared
+// between concurrent processes the way the lease-protected file cache can.
+func TestDbtUsesFileBasedStorageOnAllPlatforms(t *testing.T) {
+	ssm := defaultOsSpecificSecureStorageManager()
+	if tssm, ok := ssm.(*threadSafeSecureStorageManager); ok {
+		ssm = tssm.delegate
+	}
+	_, ok := ssm.(*fileBasedSecureStorageManager)
+	assertTrueE(t, ok, "credential storage should be file-based on "+runtime.GOOS)
+}
+
+// dbt places the cache in an OS-idiomatic location. Upstream only ever computes
+// the linux path, since it does not use the file cache elsewhere.
+//
+// The extra Credentials segment on darwin is deliberate: it allows 0700 on the
+// leaf directory without restricting all of Caches/Snowflake.
+//
+// TestBuildCredCacheDirPath covers the resolution mechanism; this covers the
+// per-OS default confs, which upstream has no equivalent of.
+func TestDbtCacheDirIsOSAppropriate(t *testing.T) {
+	var want []string
+	switch runtime.GOOS {
+	case "linux":
+		want = []string{".cache", "snowflake"}
+	case "darwin":
+		want = []string{"Library", "Caches", "Snowflake", "Credentials"}
+	case "windows":
+		want = []string{"Snowflake", "Credentials"}
+	default:
+		t.Skipf("no cache directory contract for %v", runtime.GOOS)
+	}
+
+	// Override HOME rather than credCacheDirEnv: the point is to exercise the
+	// per-OS conf, which credCacheDirEnv would short-circuit. Keeps the test off
+	// the real home directory.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("LOCALAPPDATA", home)
+	// Both are consulted ahead of HOME; empty reads as unset.
+	t.Setenv(credCacheDirEnv, "")
+	t.Setenv("XDG_CACHE_DIR", "")
+
+	ssm, err := newFileBasedSecureStorageManager()
+	assertNilF(t, err, "newFileBasedSecureStorageManager")
+	assertEqualE(t, ssm.credDirPath, filepath.Join(append([]string{home}, want...)...),
+		"cache dir should be OS-idiomatic on "+runtime.GOOS)
+}
+
+// Regression test for lookupCacheDir deriving the parent directory.
+//
+// Slicing at strings.LastIndex(cacheDir, "/") panics with "slice bounds out of
+// range [:-1]" whenever the path holds no forward slash: a relative directory,
+// or any Windows path, where filepath.Join yields backslashes. filepath.Dir
+// handles both.
+//
+// Introduced upstream by SNOW-1825790 "Implement safer file based token cache":
+// https://github.com/snowflakedb/gosnowflake/pull/1327
+func TestDbtRelativeCacheDirDoesNotPanic(t *testing.T) {
+	dir := "zz_dbt_relative_cache_dir"
+	assertNilF(t, os.MkdirAll(dir, 0o700), "mkdir")
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	t.Setenv(credCacheDirEnv, dir)
+	got, err := lookupCacheDir(credCacheDirEnv)
+	assertNilE(t, err, "lookupCacheDir should accept a relative directory")
+	assertEqualE(t, got, dir, "cache dir")
+}
+
+// Guards the OS gate dbt uses to decide whether a credential cache is possible
+// at all. This helper is a candidate for deletion in favour of upstream's
+// build-tag split; if it goes away, this test should go with it.
+func TestDbtIsCacheSupportedGOOS(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		assertTrueE(t, isCacheSupportedGOOS(goos), goos+" should support the credential cache")
+	}
+	assertFalseE(t, isCacheSupportedGOOS("plan9"), "plan9 should not support the credential cache")
 }
