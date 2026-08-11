@@ -24,6 +24,12 @@ const (
 	DefaultClientTimeout = 900 * time.Second
 	// DefaultJWTClientTimeout is the timeout for network round trip + read out http response but used for JWT auth
 	DefaultJWTClientTimeout = 10 * time.Second
+	// dbt-only: not upstream. DefaultAuthClientTimeout is the timeout for network
+	// round trip + read out http response used for non-JWT authentication
+	// requests, mirroring the http socket timeout used in snowflake-connector-python.
+	//
+	// reference: https://github.com/snowflakedb/snowflake-connector-python/blob/d1251d9f01bbf06b4b58d09f81d5e0717cc546be/src/snowflake/connector/network.py#L1090
+	DefaultAuthClientTimeout = 60 * time.Second
 	// DefaultLoginTimeout is the timeout for retry for login EXCLUDING clientTimeout
 	DefaultLoginTimeout = 300 * time.Second
 	// DefaultRequestTimeout is the timeout for retry for request EXCLUDING clientTimeout
@@ -168,6 +174,10 @@ func DSN(cfg *Config) (dsn string, err error) {
 	}
 	if cfg.JWTClientTimeout != DefaultJWTClientTimeout {
 		params.Add("jwtClientTimeout", strconv.FormatInt(int64(cfg.JWTClientTimeout/time.Second), 10))
+	}
+	// dbt-only: not upstream. Keeps authClientTimeout round-tripping through DSN().
+	if cfg.AuthClientTimeout != DefaultAuthClientTimeout {
+		params.Add("authClientTimeout", strconv.FormatInt(int64(cfg.AuthClientTimeout/time.Second), 10))
 	}
 	if cfg.LoginTimeout != DefaultLoginTimeout {
 		params.Add("loginTimeout", strconv.FormatInt(int64(cfg.LoginTimeout/time.Second), 10))
@@ -609,6 +619,10 @@ func FillMissingConfigParameters(cfg *Config) error {
 	if cfg.JWTClientTimeout == 0 {
 		cfg.JWTClientTimeout = DefaultJWTClientTimeout
 	}
+	// dbt-only: not upstream.
+	if cfg.AuthClientTimeout == 0 {
+		cfg.AuthClientTimeout = DefaultAuthClientTimeout
+	}
 	if cfg.ExternalBrowserTimeout == 0 {
 		cfg.ExternalBrowserTimeout = DefaultExternalBrowserTimeout
 	}
@@ -898,6 +912,12 @@ func parseDSNParams(cfg *Config, params string) (err error) {
 			}
 		case "jwtClientTimeout":
 			cfg.JWTClientTimeout, err = parseTimeout(value)
+			if err != nil {
+				return
+			}
+		// dbt-only: not upstream.
+		case "authClientTimeout":
+			cfg.AuthClientTimeout, err = parseTimeout(value)
 			if err != nil {
 				return
 			}

@@ -36,6 +36,11 @@ type ArrowStreamLoader interface {
 	RowTypes() []query.ExecResponseRowType
 	Location() *time.Location
 	JSONData() [][]*string
+	// dbt-only: not upstream. Must be an interface member rather than an
+	// optional provider interface (as QueryResultFormatProvider below is):
+	// consumers call QueryID() directly on an ArrowStreamLoader, without a
+	// type assertion.
+	QueryID() string
 }
 
 // QueryResultFormatProvider is an optional interface that an
@@ -300,6 +305,7 @@ type snowflakeArrowStreamChunkDownloader struct {
 	RowSet            rowSetType
 	resultIDs         []string
 	queryResultFormat string
+	queryID           string // dbt-only: not upstream. Backs the QueryID() accessor.
 }
 
 func (scd *snowflakeArrowStreamChunkDownloader) Location() *time.Location {
@@ -317,6 +323,11 @@ func (scd *snowflakeArrowStreamChunkDownloader) RowTypes() []query.ExecResponseR
 
 func (scd *snowflakeArrowStreamChunkDownloader) JSONData() [][]*string {
 	return scd.RowSet.JSON
+}
+
+// dbt-only: not upstream. See the QueryID() note on ArrowStreamLoader.
+func (scd *snowflakeArrowStreamChunkDownloader) QueryID() string {
+	return scd.queryID
 }
 
 // QueryResultFormat returns the server-reported result format for the

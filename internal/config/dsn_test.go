@@ -2580,3 +2580,58 @@ func TestSFOCSPDisableChecksEnvVar(t *testing.T) {
 		assertTrueE(t, strings.Contains(buf.String(), "fail-closed"), "log should mention fail-closed mode")
 	})
 }
+
+// dbt-only: not upstream. Covers the authClientTimeout parameter.
+//
+// Deliberately a standalone test rather than adding AuthClientTimeout to the
+// 74 expected-config literals in TestParseDSN's table: keeping it self-contained
+// means it does not conflict when upstream edits that table.
+func TestAuthClientTimeout(t *testing.T) {
+	t.Run("defaults when unset", func(t *testing.T) {
+		cfg, err := ParseDSN("u:p@a.snowflakecomputing.com:443")
+		assertNilF(t, err, "ParseDSN")
+		assertEqualE(t, cfg.AuthClientTimeout, DefaultAuthClientTimeout, "AuthClientTimeout should fall back to the default")
+	})
+
+	t.Run("parsed from DSN", func(t *testing.T) {
+		cfg, err := ParseDSN("u:p@a.snowflakecomputing.com:443?authClientTimeout=15")
+		assertNilF(t, err, "ParseDSN")
+		assertEqualE(t, cfg.AuthClientTimeout, 15*time.Second, "AuthClientTimeout should come from the DSN")
+	})
+
+	t.Run("round-trips through DSN()", func(t *testing.T) {
+		cfg := &Config{
+			User:              "u",
+			Password:          "p",
+			Account:           "a",
+			AuthClientTimeout: 15 * time.Second,
+		}
+		dsn, err := DSN(cfg)
+		assertNilF(t, err, "DSN")
+		assertTrueE(t, strings.Contains(dsn, "authClientTimeout=15"), "DSN should carry authClientTimeout, got: "+dsn)
+
+		parsed, err := ParseDSN(dsn)
+		assertNilF(t, err, "ParseDSN")
+		assertEqualE(t, parsed.AuthClientTimeout, 15*time.Second, "AuthClientTimeout should survive the round trip")
+	})
+
+	t.Run("omitted from DSN() when default", func(t *testing.T) {
+		cfg := &Config{
+			User:              "u",
+			Password:          "p",
+			Account:           "a",
+			AuthClientTimeout: DefaultAuthClientTimeout,
+		}
+		dsn, err := DSN(cfg)
+		assertNilF(t, err, "DSN")
+		assertFalseE(t, strings.Contains(dsn, "authClientTimeout"), "default should not be serialized, got: "+dsn)
+	})
+
+	t.Run("read from TOML in both spellings", func(t *testing.T) {
+		for _, key := range []string{"authClientTimeout", "auth_client_timeout"} {
+			cfg := &Config{}
+			assertNilF(t, HandleSingleParam(cfg, key, "15"), "HandleSingleParam("+key+")")
+			assertEqualE(t, cfg.AuthClientTimeout, 15*time.Second, "AuthClientTimeout from TOML key "+key)
+		}
+	})
+}

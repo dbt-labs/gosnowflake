@@ -58,6 +58,9 @@ type Config struct {
 	ClientTimeout time.Duration // Timeout for network round trip + read out http response
 	// Deprecated: timeouts may be reorganized in a future release.
 	JWTClientTimeout time.Duration // Timeout for network round trip + read out http response used when JWT token auth is taking place
+	// dbt-only: not upstream. Per-attempt timeout for non-JWT authentication
+	// requests, mirroring the http socket timeout in snowflake-connector-python.
+	AuthClientTimeout time.Duration // Timeout for network round trip + read out http response used for non-JWT authentication requests
 	// Deprecated: timeouts may be reorganized in a future release.
 	ExternalBrowserTimeout time.Duration // Timeout for external browser login
 	// Deprecated: timeouts may be reorganized in a future release.

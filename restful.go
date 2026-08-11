@@ -56,6 +56,7 @@ type snowflakeRestful struct {
 
 	Client        *http.Client
 	JWTClient     *http.Client
+	AuthClient    *http.Client // dbt-only: not upstream. Non-JWT auth requests, with a shorter per-attempt timeout (authClientTimeout).
 	TokenAccessor TokenAccessor
 	HeartBeat     *heartbeat
 
@@ -101,7 +102,14 @@ func (sr *snowflakeRestful) getClientFor(authType AuthType) *http.Client {
 	case AuthTypeJwt:
 		return sr.JWTClient
 	default:
-		return sr.Client
+		// dbt-only: upstream returns sr.Client here. Non-JWT auth goes through
+		// a dedicated AuthClient carrying a shorter per-attempt timeout
+		// (authClientTimeout). AuthClient is optional; fall back when unset
+		// rather than returning a nil client.
+		if sr.AuthClient == nil {
+			return sr.Client
+		}
+		return sr.AuthClient
 	}
 }
 

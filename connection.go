@@ -592,6 +592,8 @@ func (sc *snowflakeConn) QueryArrowStream(ctx context.Context, query string, bin
 		ChunkHeader:       data.Data.ChunkHeaders,
 		FuncGet:           getChunk,
 		queryResultFormat: data.Data.QueryResultFormat,
+		// dbt-only: not upstream. Backs ArrowStreamLoader.QueryID().
+		queryID: data.Data.QueryID,
 		RowSet: rowSetType{
 			RowType:      data.Data.RowType,
 			JSON:         data.Data.RowSet,
@@ -654,6 +656,11 @@ func buildSnowflakeConn(ctx context.Context, config Config) (*snowflakeConn, err
 		},
 		JWTClient: &http.Client{
 			Timeout:   sc.cfg.JWTClientTimeout,
+			Transport: st,
+		},
+		// dbt-only: not upstream. Non-JWT authentications take a different timeout.
+		AuthClient: &http.Client{
+			Timeout:   sc.cfg.AuthClientTimeout,
 			Transport: st,
 		},
 		TokenAccessor:       tokenAccessor,

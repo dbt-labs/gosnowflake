@@ -332,3 +332,14 @@ func TestArrowStreamBatchGetStreamPreservesCompletedEOF(t *testing.T) {
 		})
 	}
 }
+
+// dbt-only: not upstream. Pins the QueryID contract consumers depend on.
+//
+// The assignment to ArrowStreamLoader is the load-bearing part: it fails to
+// compile if QueryID() is ever dropped from the interface.
+func TestArrowStreamLoaderQueryID(t *testing.T) {
+	var ld ArrowStreamLoader = &snowflakeArrowStreamChunkDownloader{
+		queryID: "01b2c3d4-0000-1111-2222-333344445555",
+	}
+	assertEqualE(t, ld.QueryID(), "01b2c3d4-0000-1111-2222-333344445555", "QueryID should return the stored query ID")
+}

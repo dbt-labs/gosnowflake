@@ -139,6 +139,9 @@ func HandleSingleParam(cfg *Config, key string, value any) error {
 		cfg.ClientTimeout, err = ParseDuration(value)
 	case "jwtclienttimeout":
 		cfg.JWTClientTimeout, err = ParseDuration(value)
+	// dbt-only: not upstream.
+	case "authclienttimeout":
+		cfg.AuthClientTimeout, err = ParseDuration(value)
 	case "logintimeout":
 		cfg.LoginTimeout, err = ParseDuration(value)
 	case "requesttimeout":
