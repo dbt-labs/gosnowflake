@@ -9,15 +9,16 @@ import (
 	"fmt"
 	errors2 "github.com/snowflakedb/gosnowflake/v2/internal/errors"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/pkg/browser"
+	"golang.org/x/term"
 )
 
 const (
@@ -52,23 +53,28 @@ func buildResponse(body string) (bytes.Buffer, error) {
 
 // This opens a socket that listens on all available unicast
 // and any anycast IP addresses locally. By specifying "0", we are
-// able to bind to a free port.
-func createLocalTCPListener(port int) (*net.TCPListener, error) {
+// able to bind to a free port. Specifying a fixed port may cause a race condition.
+//
+// dbt-only deviation: binds through net.ListenConfig so that both binds observe
+// context cancellation, rather than net.Listen which ignores it.
+func createLocalTCPListener(ctx context.Context, port int) (*net.TCPListener, error) {
 	logger.Debugf("creating local TCP listener on port %v", port)
-	allAddressesListener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%v", port))
+
+	var lc net.ListenConfig
+	allAddressesListener, err := lc.Listen(ctx, "tcp", fmt.Sprintf("0.0.0.0:%v", port))
 	if err != nil {
-		logger.Warnf("error while setting up 0.0.0.0 listener: %v", err)
+		logger.Warnf("unable to bind to 0.0.0.0:%v — possible permission or firewall issue: %v", port, err)
 		return nil, err
 	}
-	logger.Debug("Closing 0.0.0.0 tcp listener")
+	logger.Debugf("successfully bound to 0.0.0.0:%v; closing test listener", port)
 	if err := allAddressesListener.Close(); err != nil {
 		logger.Errorf("error while closing TCP listener. %v", err)
 		return nil, err
 	}
 
-	l, err := net.Listen("tcp", fmt.Sprintf("localhost:%v", port))
+	l, err := lc.Listen(ctx, "tcp", fmt.Sprintf("localhost:%v", port))
 	if err != nil {
-		logger.Warnf("error while setting up listener: %v", err)
+		logger.Warnf("error while setting up listener, unable to bind to localhost:%v: %v", port, err)
 		return nil, err
 	}
 
@@ -239,12 +245,14 @@ func authenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, au
 //   - Snowflake directs the user back to the driver
 //   - authenticate is complete!
 func doAuthenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, authenticator string, application string, account string, user string, disableConsoleLogin ConfigBool) authenticateByExternalBrowserResult {
-	l, err := createLocalTCPListener(0)
+	l, err := createLocalTCPListener(ctx, 0)
 	if err != nil {
 		return authenticateByExternalBrowserResult{nil, nil, err}
 	}
 	defer func() {
-		if err = l.Close(); err != nil {
+		// The manual-paste path closes the listener early; a second close is
+		// expected there and is not an error worth reporting.
+		if err = l.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 			logger.Errorf("error while closing TCP listener for external browser (%v). %v", l.Addr().String(), err)
 		}
 	}()
@@ -265,8 +273,24 @@ func doAuthenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, 
 		return authenticateByExternalBrowserResult{nil, nil, err}
 	}
 
-	if err = defaultSamlResponseProvider().run(loginURL); err != nil {
+	// A non-empty token means the provider could not reach the browser and
+	// fell back to having the user paste the redirect URL; no callback will
+	// ever arrive on the listener in that case.
+	manualToken, err := defaultSamlResponseProvider().run(loginURL)
+	if err != nil {
 		return authenticateByExternalBrowserResult{nil, nil, err}
+	}
+	if manualToken != "" {
+		// Close early so Snowflake cannot connect to a listener nobody reads.
+		if err := l.Close(); err != nil {
+			logger.WithContext(ctx).Warnf("error while closing unused TCP listener. %v", err)
+		}
+		unescaped, err := url.QueryUnescape(manualToken)
+		if err != nil {
+			logger.WithContext(ctx).Errorf("unable to unescape pasted saml response. err: %v", err)
+			return authenticateByExternalBrowserResult{nil, nil, err}
+		}
+		return authenticateByExternalBrowserResult{[]byte(unescaped), []byte(proofKey), nil}
 	}
 
 	encodedSamlResponseChan := make(chan string)
@@ -276,8 +300,10 @@ func doAuthenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, 
 	var errFromGoroutine error
 	conn, err := l.Accept()
 	if err != nil {
+		// dbt-only: upstream calls log.Fatal here, terminating the host process
+		// from inside a library.
 		logger.WithContext(ctx).Errorf("unable to accept connection. err: %v", err)
-		log.Fatal(err)
+		return authenticateByExternalBrowserResult{nil, nil, err}
 	}
 	go func(c net.Conn) {
 		var buf bytes.Buffer
@@ -342,14 +368,81 @@ func doAuthenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, 
 }
 
 type samlResponseProvider interface {
-	run(url string) error
+	// run drives the user to the login URL. It returns an empty token when the
+	// browser opened and the SAML response will arrive on the local listener,
+	// or a non-empty token when the user supplied the redirect URL by hand.
+	run(loginURL string) (string, error)
 }
 
 type externalBrowserSamlResponseProvider struct {
 }
 
-func (e externalBrowserSamlResponseProvider) run(url string) error {
-	return openBrowser(url)
+// dbt-only: not upstream. Upstream fails the whole login when no browser can be
+// opened; headless shells and remote containers are then unusable. Falling back
+// to a pasted redirect URL keeps external-browser auth available there.
+func (e externalBrowserSamlResponseProvider) run(loginURL string) (string, error) {
+	logger.Info("Initiating login request in browser with your identity provider.")
+
+	if err := openBrowser(loginURL); err == nil {
+		return "", nil
+	}
+
+	logger.Warnf("external-browser auth: could not open browser automatically.")
+	logger.Warnf("manual authentication URL: %s", loginURL)
+
+	fmt.Printf("\n%s\n\nWe were unable to open a browser window for you.\n"+
+		"Please open the URL above manually, complete the sign-in, then paste\n"+
+		"the URL you were finally redirected to here.\n\n", loginURL)
+
+	return manualTokenFallback(os.Stdin)
+}
+
+// manualTokenFallback prompts for the post-login redirect URL and extracts its
+// token. The terminal is switched to raw mode so that term.Terminal, rather
+// than the tty line discipline, does the editing: canonical mode truncates
+// input at 4096 bytes on Linux, and a redirect URL carrying a SAML response is
+// routinely longer than that.
+func manualTokenFallback(in *os.File) (string, error) {
+	fd := int(in.Fd())
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return "", fmt.Errorf("cannot switch tty to raw mode: %w", err)
+	}
+	defer func() {
+		if restoreErr := term.Restore(fd, oldState); restoreErr != nil {
+			logger.Warnf("could not restore terminal state. %v", restoreErr)
+		}
+	}()
+
+	t := term.NewTerminal(in, "Paste redirect URL: ")
+	for {
+		line, err := t.ReadLine()
+		if errors.Is(err, io.EOF) {
+			return "", errors.New("user aborted external browser authentication")
+		}
+		if err != nil {
+			return "", err
+		}
+		if line == "" {
+			return "", errors.New("no URL provided for external browser authentication")
+		}
+		if token, ok := extractToken(line); ok {
+			return token, nil
+		}
+		fmt.Fprintln(t, "Token not found. Please try again.")
+	}
+}
+
+// extractToken pulls the "token" query parameter out of the redirect URL the
+// user pasted. The bool reports whether a non-empty token was present, so that
+// a well-formed URL carrying no token is retried rather than accepted.
+func extractToken(s string) (string, bool) {
+	u, err := url.Parse(s)
+	if err != nil {
+		return "", false
+	}
+	t := u.Query().Get("token")
+	return t, t != ""
 }
 
 var defaultSamlResponseProvider = func() samlResponseProvider {

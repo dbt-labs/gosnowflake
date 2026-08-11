@@ -185,7 +185,7 @@ func (oauthClient *oauthClient) doAuthenticateByOAuthAuthorizationCode(tcpListen
 }
 
 func (oauthClient *oauthClient) setupListener() (*net.TCPListener, int, error) {
-	tcpListener, err := createLocalTCPListener(oauthClient.port)
+	tcpListener, err := createLocalTCPListener(oauthClient.ctx, oauthClient.port)
 	if err != nil {
 		return nil, 0, err
 	}
