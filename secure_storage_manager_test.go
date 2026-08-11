@@ -76,10 +76,10 @@ func TestSnowflakeFileBasedSecureStorageManager(t *testing.T) {
 	t.Run("store single token", func(t *testing.T) {
 		tokenSpec := newMfaTokenSpec(&Config{Host: "host.com", User: "johndoe"})
 		cred := "token123"
-		ssm.setCredential(tokenSpec, cred)
-		assertEqualE(t, ssm.getCredential(tokenSpec), cred)
-		ssm.deleteCredential(tokenSpec)
-		assertEqualE(t, ssm.getCredential(tokenSpec), "")
+		ssmSet(t, ssm, tokenSpec, cred)
+		assertEqualE(t, ssmGet(t, ssm, tokenSpec), cred)
+		ssmDelete(t, ssm, tokenSpec)
+		assertEqualE(t, ssmGet(t, ssm, tokenSpec), "")
 	})
 
 	t.Run("store tokens of different types, hosts and users", func(t *testing.T) {
@@ -91,19 +91,19 @@ func TestSnowflakeFileBasedSecureStorageManager(t *testing.T) {
 		idCred2 := "token56"
 		idTokenSpec3 := newIDTokenSpec(&Config{Host: "host.com", User: "someoneelse"})
 		idCred3 := "token78"
-		ssm.setCredential(mfaTokenSpec, mfaCred)
-		ssm.setCredential(idTokenSpec, idCred)
-		ssm.setCredential(idTokenSpec2, idCred2)
-		ssm.setCredential(idTokenSpec3, idCred3)
-		assertEqualE(t, ssm.getCredential(mfaTokenSpec), mfaCred)
-		assertEqualE(t, ssm.getCredential(idTokenSpec), idCred)
-		assertEqualE(t, ssm.getCredential(idTokenSpec2), idCred2)
-		assertEqualE(t, ssm.getCredential(idTokenSpec3), idCred3)
-		ssm.deleteCredential(mfaTokenSpec)
-		assertEqualE(t, ssm.getCredential(mfaTokenSpec), "")
-		assertEqualE(t, ssm.getCredential(idTokenSpec), idCred)
-		assertEqualE(t, ssm.getCredential(idTokenSpec2), idCred2)
-		assertEqualE(t, ssm.getCredential(idTokenSpec3), idCred3)
+		ssmSet(t, ssm, mfaTokenSpec, mfaCred)
+		ssmSet(t, ssm, idTokenSpec, idCred)
+		ssmSet(t, ssm, idTokenSpec2, idCred2)
+		ssmSet(t, ssm, idTokenSpec3, idCred3)
+		assertEqualE(t, ssmGet(t, ssm, mfaTokenSpec), mfaCred)
+		assertEqualE(t, ssmGet(t, ssm, idTokenSpec), idCred)
+		assertEqualE(t, ssmGet(t, ssm, idTokenSpec2), idCred2)
+		assertEqualE(t, ssmGet(t, ssm, idTokenSpec3), idCred3)
+		ssmDelete(t, ssm, mfaTokenSpec)
+		assertEqualE(t, ssmGet(t, ssm, mfaTokenSpec), "")
+		assertEqualE(t, ssmGet(t, ssm, idTokenSpec), idCred)
+		assertEqualE(t, ssmGet(t, ssm, idTokenSpec2), idCred2)
+		assertEqualE(t, ssmGet(t, ssm, idTokenSpec3), idCred3)
 	})
 
 	t.Run("override single token", func(t *testing.T) {
@@ -111,21 +111,21 @@ func TestSnowflakeFileBasedSecureStorageManager(t *testing.T) {
 		mfaCred := "token123"
 		idTokenSpec := newIDTokenSpec(&Config{Host: "host.com", User: "johndoe"})
 		idCred := "token456"
-		ssm.setCredential(mfaTokenSpec, mfaCred)
-		ssm.setCredential(idTokenSpec, idCred)
-		assertEqualE(t, ssm.getCredential(mfaTokenSpec), mfaCred)
+		ssmSet(t, ssm, mfaTokenSpec, mfaCred)
+		ssmSet(t, ssm, idTokenSpec, idCred)
+		assertEqualE(t, ssmGet(t, ssm, mfaTokenSpec), mfaCred)
 		mfaCredOverride := "token789"
-		ssm.setCredential(mfaTokenSpec, mfaCredOverride)
-		assertEqualE(t, ssm.getCredential(mfaTokenSpec), mfaCredOverride)
-		ssm.setCredential(idTokenSpec, idCred)
+		ssmSet(t, ssm, mfaTokenSpec, mfaCredOverride)
+		assertEqualE(t, ssmGet(t, ssm, mfaTokenSpec), mfaCredOverride)
+		ssmSet(t, ssm, idTokenSpec, idCred)
 	})
 
 	t.Run("unlock stale cache", func(t *testing.T) {
 		tokenSpec := newMfaTokenSpec(&Config{Host: "stale", User: "cache"})
 		assertNilF(t, os.Mkdir(ssm.lockPath(), 0700))
 		time.Sleep(1000 * time.Millisecond)
-		ssm.setCredential(tokenSpec, "unlocked")
-		assertEqualE(t, ssm.getCredential(tokenSpec), "unlocked")
+		ssmSet(t, ssm, tokenSpec, "unlocked")
+		assertEqualE(t, ssmGet(t, ssm, tokenSpec), "unlocked")
 	})
 
 	t.Run("wait for other process to unlock cache", func(t *testing.T) {
@@ -137,9 +137,9 @@ func TestSnowflakeFileBasedSecureStorageManager(t *testing.T) {
 			time.Sleep(500 * time.Millisecond)
 			assertNilF(t, os.Remove(ssm.lockPath()))
 		}()
-		ssm.setCredential(tokenSpec, "unlocked")
+		ssmSet(t, ssm, tokenSpec, "unlocked")
 		totalDurationMillis := time.Since(startTime).Milliseconds()
-		assertEqualE(t, ssm.getCredential(tokenSpec), "unlocked")
+		assertEqualE(t, ssmGet(t, ssm, tokenSpec), "unlocked")
 		assertTrueE(t, totalDurationMillis > 1000 && totalDurationMillis < 1200)
 	})
 
@@ -149,7 +149,7 @@ func TestSnowflakeFileBasedSecureStorageManager(t *testing.T) {
 		}`)
 		err = os.WriteFile(ssm.credFilePath(), content, 0600)
 		assertNilF(t, err)
-		ssm.setCredential(newMfaTokenSpec(&Config{Host: "somehost.com", User: "someUser"}), "someToken")
+		ssmSet(t, ssm, newMfaTokenSpec(&Config{Host: "somehost.com", User: "someUser"}), "someToken")
 		result, err := os.ReadFile(ssm.credFilePath())
 		assertNilF(t, err)
 		assertStringContainsE(t, string(result), `"otherKey":"otherValue"`)
@@ -157,15 +157,15 @@ func TestSnowflakeFileBasedSecureStorageManager(t *testing.T) {
 
 	t.Run("should not modify file if it has wrong permission", func(t *testing.T) {
 		tokenSpec := newMfaTokenSpec(&Config{Host: "somehost.com", User: "someUser"})
-		ssm.setCredential(tokenSpec, "initialValue")
-		assertEqualE(t, ssm.getCredential(tokenSpec), "initialValue")
+		ssmSet(t, ssm, tokenSpec, "initialValue")
+		assertEqualE(t, ssmGet(t, ssm, tokenSpec), "initialValue")
 		err = os.Chmod(ssm.credFilePath(), 0644)
 		assertNilF(t, err)
 		defer func() {
 			assertNilE(t, os.Chmod(ssm.credFilePath(), 0600))
 		}()
-		ssm.setCredential(tokenSpec, "newValue")
-		assertEqualE(t, ssm.getCredential(tokenSpec), "")
+		ssmSet(t, ssm, tokenSpec, "newValue")
+		assertEqualE(t, ssmGet(t, ssm, tokenSpec), "")
 		fileContent, err := os.ReadFile(ssm.credFilePath())
 		assertNilF(t, err)
 		var m map[string]any
@@ -179,15 +179,15 @@ func TestSnowflakeFileBasedSecureStorageManager(t *testing.T) {
 
 	t.Run("should not modify file if its dir has wrong permission", func(t *testing.T) {
 		tokenSpec := newMfaTokenSpec(&Config{Host: "somehost.com", User: "someUser"})
-		ssm.setCredential(tokenSpec, "initialValue")
-		assertEqualE(t, ssm.getCredential(tokenSpec), "initialValue")
+		ssmSet(t, ssm, tokenSpec, "initialValue")
+		assertEqualE(t, ssmGet(t, ssm, tokenSpec), "initialValue")
 		err = os.Chmod(ssm.credDirPath, 0777)
 		assertNilF(t, err)
 		defer func() {
 			assertNilE(t, os.Chmod(ssm.credDirPath, 0700))
 		}()
-		ssm.setCredential(tokenSpec, "newValue")
-		assertEqualE(t, ssm.getCredential(tokenSpec), "")
+		ssmSet(t, ssm, tokenSpec, "newValue")
+		assertEqualE(t, ssmGet(t, ssm, tokenSpec), "")
 		fileContent, err := os.ReadFile(ssm.credFilePath())
 		assertNilF(t, err)
 		var m map[string]any
@@ -217,25 +217,25 @@ func TestFileBasedCacheSkipPermissionsVerification(t *testing.T) {
 	tokenSpec := newMfaTokenSpec(&Config{Host: "somehost.com", User: "someUser"})
 
 	t.Run("round-trip with 0644 cache file", func(t *testing.T) {
-		ssm.setCredential(tokenSpec, "initialValue")
-		assertEqualE(t, ssm.getCredential(tokenSpec), "initialValue")
+		ssmSet(t, ssm, tokenSpec, "initialValue")
+		assertEqualE(t, ssmGet(t, ssm, tokenSpec), "initialValue")
 		assertNilF(t, os.Chmod(ssm.credFilePath(), 0644))
 		defer func() {
 			assertNilE(t, os.Chmod(ssm.credFilePath(), 0600))
 		}()
-		ssm.setCredential(tokenSpec, "newValue")
-		assertEqualE(t, ssm.getCredential(tokenSpec), "newValue")
+		ssmSet(t, ssm, tokenSpec, "newValue")
+		assertEqualE(t, ssmGet(t, ssm, tokenSpec), "newValue")
 	})
 
 	t.Run("round-trip with 0777 cache dir", func(t *testing.T) {
-		ssm.setCredential(tokenSpec, "initialValue")
-		assertEqualE(t, ssm.getCredential(tokenSpec), "initialValue")
+		ssmSet(t, ssm, tokenSpec, "initialValue")
+		assertEqualE(t, ssmGet(t, ssm, tokenSpec), "initialValue")
 		assertNilF(t, os.Chmod(ssm.credDirPath, 0777))
 		defer func() {
 			assertNilE(t, os.Chmod(ssm.credDirPath, 0700))
 		}()
-		ssm.setCredential(tokenSpec, "newValue")
-		assertEqualE(t, ssm.getCredential(tokenSpec), "newValue")
+		ssmSet(t, ssm, tokenSpec, "newValue")
+		assertEqualE(t, ssmGet(t, ssm, tokenSpec), "newValue")
 	})
 }
 
@@ -251,11 +251,11 @@ func TestSetAndGetCredential(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			skipOnMac(t, "keyring asks for password")
 			fakeMfaToken := "test token"
-			credentialsStorage.setCredential(tc.spec, fakeMfaToken)
-			assertEqualE(t, credentialsStorage.getCredential(tc.spec), fakeMfaToken)
+			testSetCredential(t, tc.spec, fakeMfaToken)
+			assertEqualE(t, testGetCredential(t, tc.spec), fakeMfaToken)
 
-			credentialsStorage.deleteCredential(tc.spec)
-			assertEqualE(t, credentialsStorage.getCredential(tc.spec), "")
+			testDeleteCredential(t, tc.spec)
+			assertEqualE(t, testGetCredential(t, tc.spec), "")
 		})
 	}
 }
@@ -271,8 +271,8 @@ func TestSkipStoringCredentialIfUserIsEmpty(t *testing.T) {
 
 	for _, tc := range specs {
 		t.Run(tc.host, func(t *testing.T) {
-			credentialsStorage.setCredential(tc.spec, "non-empty-value")
-			assertEqualE(t, credentialsStorage.getCredential(tc.spec), "")
+			testSetCredential(t, tc.spec, "non-empty-value")
+			assertEqualE(t, testGetCredential(t, tc.spec), "")
 		})
 	}
 }
@@ -288,8 +288,8 @@ func TestSkipStoringCredentialIfHostIsEmpty(t *testing.T) {
 
 	for _, tc := range specs {
 		t.Run(tc.user, func(t *testing.T) {
-			credentialsStorage.setCredential(tc.spec, "non-empty-value")
-			assertEqualE(t, credentialsStorage.getCredential(tc.spec), "")
+			testSetCredential(t, tc.spec, "non-empty-value")
+			assertEqualE(t, testGetCredential(t, tc.spec), "")
 		})
 	}
 }
@@ -320,10 +320,10 @@ func TestStoreTemporaryCredential(t *testing.T) {
 
 	for _, test := range testcases {
 		t.Run(test.value, func(t *testing.T) {
-			ssm.setCredential(test.tokenSpec, test.value)
-			assertEqualE(t, ssm.getCredential(test.tokenSpec), test.value)
-			ssm.deleteCredential(test.tokenSpec)
-			assertEqualE(t, ssm.getCredential(test.tokenSpec), "")
+			ssmSet(t, ssm, test.tokenSpec, test.value)
+			assertEqualE(t, ssmGet(t, ssm, test.tokenSpec), test.value)
+			ssmDelete(t, ssm, test.tokenSpec)
+			assertEqualE(t, ssmGet(t, ssm, test.tokenSpec), "")
 		})
 	}
 }
@@ -548,7 +548,7 @@ func TestFileBackendStoresKeyVerbatim(t *testing.T) {
 	assertNilF(t, err)
 
 	tokenSpec := newMfaTokenSpec(&Config{Host: "host.com", User: "testuser"})
-	ssm.setCredential(tokenSpec, "testvalue")
+	ssmSet(t, ssm, tokenSpec, "testvalue")
 
 	fileContent, err := os.ReadFile(ssm.credFilePath())
 	assertNilF(t, err)
@@ -681,4 +681,66 @@ func TestDbtIsCacheSupportedGOOS(t *testing.T) {
 		assertTrueE(t, isCacheSupportedGOOS(goos), goos+" should support the credential cache")
 	}
 	assertFalseE(t, isCacheSupportedGOOS("plan9"), "plan9 should not support the credential cache")
+}
+
+// Lease-scoped wrappers for tests. Each acquires and releases immediately rather
+// than holding a lease across the test: several callers drive a full login, which
+// acquires its own lease, and an overlapping hold would block for the whole lease
+// operation timeout.
+//
+// Errors are discarded, matching the void signatures these calls were written
+// against -- several tests pass a deliberately invalid spec and expect a silent
+// skip. Tests that care about the error call the manager directly.
+func testSetCredential(t *testing.T, spec secureTokenSpec, value string) {
+	lease, err := credentialsStorage.acquireLease()
+	assertNilF(t, err, "acquire lease")
+	defer func() { _ = lease.Release() }()
+	_ = credentialsStorage.setCredential(lease, spec, value)
+}
+
+func testGetCredential(t *testing.T, spec secureTokenSpec) string {
+	lease, err := credentialsStorage.acquireLease()
+	assertNilF(t, err, "acquire lease")
+	defer func() { _ = lease.Release() }()
+	value, _ := credentialsStorage.getCredential(lease, spec)
+	return value
+}
+
+func testDeleteCredential(t *testing.T, spec secureTokenSpec) {
+	lease, err := credentialsStorage.acquireLease()
+	assertNilF(t, err, "acquire lease")
+	defer func() { _ = lease.Release() }()
+	_ = credentialsStorage.deleteCredential(lease, spec)
+}
+
+// testLease is for tests that call a lease-taking method directly rather than
+// through a login, so no nested acquisition can occur.
+func testLease(t *testing.T) *Lease {
+	lease, err := credentialsStorage.acquireLease()
+	assertNilF(t, err, "acquire lease")
+	t.Cleanup(func() { _ = lease.Release() })
+	return lease
+}
+
+// Same idea as the global helpers above, bound to a specific manager instance.
+func ssmSet(t *testing.T, ssm *fileBasedSecureStorageManager, spec secureTokenSpec, value string) {
+	lease, err := ssm.acquireLease()
+	assertNilF(t, err, "acquire lease")
+	defer func() { _ = lease.Release() }()
+	_ = ssm.setCredential(lease, spec, value)
+}
+
+func ssmGet(t *testing.T, ssm *fileBasedSecureStorageManager, spec secureTokenSpec) string {
+	lease, err := ssm.acquireLease()
+	assertNilF(t, err, "acquire lease")
+	defer func() { _ = lease.Release() }()
+	value, _ := ssm.getCredential(lease, spec)
+	return value
+}
+
+func ssmDelete(t *testing.T, ssm *fileBasedSecureStorageManager, spec secureTokenSpec) {
+	lease, err := ssm.acquireLease()
+	assertNilF(t, err, "acquire lease")
+	defer func() { _ = lease.Release() }()
+	_ = ssm.deleteCredential(lease, spec)
 }

@@ -4,7 +4,6 @@ package gosnowflake
 
 import (
 	"runtime"
-	"sync"
 )
 
 func defaultOsSpecificSecureStorageManager() secureStorageManager {
@@ -14,5 +13,8 @@ func defaultOsSpecificSecureStorageManager() secureStorageManager {
 		logger.Debugf("failed to create credentials cache dir: %v. Not storing credentials locally.", err)
 		return newNoopSecureStorageManager()
 	}
-	return &threadSafeSecureStorageManager{&sync.Mutex{}, ssm}
+	// dbt-only: returned unwrapped. The lease arbitrates on file content, so it
+	// serialises goroutines as well as processes, and ConfigureLeaseOnce needs to
+	// reach the concrete manager.
+	return ssm
 }

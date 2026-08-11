@@ -253,6 +253,7 @@ func getHeaders() map[string]string {
 // Used to authenticate the user with Snowflake.
 func authenticate(
 	ctx context.Context,
+	lease *Lease,
 	sc *snowflakeConn,
 	samlResponse []byte,
 	proofKey []byte,
@@ -311,7 +312,7 @@ func authenticate(
 		sessionParameters[clientStoreTemporaryCredential] = true
 	}
 	bodyCreator := func() ([]byte, error) {
-		return createRequestBody(sc, sessionParameters, clientEnvironment, proofKey, samlResponse)
+		return createRequestBody(sc, lease, sessionParameters, clientEnvironment, proofKey, samlResponse)
 	}
 
 	params := &url.Values{}
@@ -338,14 +339,22 @@ func authenticate(
 	if !respd.Success {
 		logger.WithContext(ctx).Error("Authentication FAILED")
 		sc.rest.TokenAccessor.SetTokens("", "", -1)
+		// dbt-only: a write that could not be performed under a relaxed read is
+		// reported so the caller can escalate to a held lease and retry.
 		if sessionParameters[clientRequestMfaToken] == true {
-			credentialsStorage.deleteCredential(newMfaTokenSpec(sc.cfg))
+			if err := credentialsStorage.deleteCredential(lease, newMfaTokenSpec(sc.cfg)); err != nil && lease.RelaxedReadAllowed {
+				return nil, err
+			}
 		}
 		if sessionParameters[clientStoreTemporaryCredential] == true && sc.cfg.Authenticator == AuthTypeExternalBrowser {
-			credentialsStorage.deleteCredential(newIDTokenSpec(sc.cfg))
+			if err := credentialsStorage.deleteCredential(lease, newIDTokenSpec(sc.cfg)); err != nil && lease.RelaxedReadAllowed {
+				return nil, err
+			}
 		}
 		if sessionParameters[clientStoreTemporaryCredential] == true && isOauthNativeFlow(sc.cfg.Authenticator) {
-			credentialsStorage.deleteCredential(newOAuthAccessTokenSpec(sc.cfg))
+			if err := credentialsStorage.deleteCredential(lease, newOAuthAccessTokenSpec(sc.cfg)); err != nil && lease.RelaxedReadAllowed {
+				return nil, err
+			}
 		}
 		code, err := strconv.Atoi(respd.Code)
 		if err != nil {
@@ -360,10 +369,14 @@ func authenticate(
 	logger.WithContext(ctx).Info("Authentication SUCCESS")
 	sc.rest.TokenAccessor.SetTokens(respd.Data.Token, respd.Data.MasterToken, respd.Data.SessionID)
 	if shouldCacheMfaToken(sc.cfg.Authenticator, sessionParameters) {
-		credentialsStorage.setCredential(newMfaTokenSpec(sc.cfg), respd.Data.MfaToken)
+		if err := credentialsStorage.setCredential(lease, newMfaTokenSpec(sc.cfg), respd.Data.MfaToken); err != nil && lease.RelaxedReadAllowed {
+			return nil, err
+		}
 	}
 	if shouldCacheIDToken(sc.cfg.Authenticator, sessionParameters, respd.Data.IDToken) {
-		credentialsStorage.setCredential(newIDTokenSpec(sc.cfg), respd.Data.IDToken)
+		if err := credentialsStorage.setCredential(lease, newIDTokenSpec(sc.cfg), respd.Data.IDToken); err != nil && lease.RelaxedReadAllowed {
+			return nil, err
+		}
 	}
 	return &respd.Data, nil
 }
@@ -488,7 +501,7 @@ func parseAccount(account string) string {
 	return head
 }
 
-func createRequestBody(sc *snowflakeConn, sessionParameters map[string]any,
+func createRequestBody(sc *snowflakeConn, lease *Lease, sessionParameters map[string]any,
 	clientEnvironment authRequestClientEnvironment, proofKey []byte, samlResponse []byte,
 ) ([]byte, error) {
 	requestMain := authRequestData{
@@ -575,7 +588,7 @@ func createRequestBody(sc *snowflakeConn, sessionParameters map[string]any,
 		}
 	case AuthTypeOAuthAuthorizationCode:
 		logger.WithContext(sc.ctx).Debug("OAuth authorization code")
-		token, err := authenticateByAuthorizationCode(sc)
+		token, err := authenticateByAuthorizationCode(sc, lease)
 		if err != nil {
 			return nil, err
 		}
@@ -587,7 +600,7 @@ func createRequestBody(sc *snowflakeConn, sessionParameters map[string]any,
 		if err != nil {
 			return nil, err
 		}
-		token, err := oauthClient.authenticateByOAuthClientCredentials()
+		token, err := oauthClient.authenticateByOAuthClientCredentials(lease)
 		if err != nil {
 			return nil, err
 		}
@@ -621,20 +634,20 @@ func createRequestBody(sc *snowflakeConn, sessionParameters map[string]any,
 	return jsonBody, nil
 }
 
-func authenticateByAuthorizationCode(sc *snowflakeConn) (string, error) {
+func authenticateByAuthorizationCode(sc *snowflakeConn, lease *Lease) (string, error) {
 	oauthClient, err := newOauthClient(sc.ctx, sc.cfg, sc)
 	if err != nil {
 		return "", err
 	}
 	if !isEligibleForParallelLogin(sc.cfg, sc.cfg.ClientStoreTemporaryCredential) {
-		return oauthClient.authenticateByOAuthAuthorizationCode()
+		return oauthClient.authenticateByOAuthAuthorizationCode(lease)
 	}
 
 	lockKey := newOAuthAccessTokenSpec(sc.cfg)
 	valueAwaiter := valueAwaitHolder.get(lockKey)
 	defer valueAwaiter.resumeOne()
 	token, err := awaitValue(valueAwaiter, func() (string, error) {
-		return credentialsStorage.getCredential(newOAuthAccessTokenSpec(sc.cfg)), nil
+		return credentialsStorage.getCredential(lease, newOAuthAccessTokenSpec(sc.cfg))
 	}, func(s string, err error) bool {
 		return s != ""
 	}, func() string {
@@ -643,7 +656,7 @@ func authenticateByAuthorizationCode(sc *snowflakeConn) (string, error) {
 	if err != nil || token != "" {
 		return token, err
 	}
-	token, err = oauthClient.authenticateByOAuthAuthorizationCode()
+	token, err = oauthClient.authenticateByOAuthAuthorizationCode(lease)
 	if err != nil {
 		return "", err
 	}
@@ -746,7 +759,41 @@ func clearExtBrowserFailure(key string) {
 	lastFail.Delete(key)
 }
 
+// dbt-only: the first attempt runs on a *broken* lease with relaxed reads, so a
+// login served entirely from cache never pays for a lease. Any operation that must
+// write, or that refuses to act on a relaxed read — opening a browser tab, above
+// all — fails with ErrFailedToRenewLease, and the second attempt runs holding a
+// real lease.
 func authenticateWithConfig(sc *snowflakeConn) error {
+	lease := credentialsStorage.brokenLease()
+	lease.RelaxedReadAllowed = true
+
+	var err error
+	for range 2 {
+		// Deferred per iteration on purpose: the receiver is bound now, so both the
+		// broken lease and any acquired replacement are released at return.
+		defer func(l *Lease) {
+			if relErr := l.Release(); relErr != nil {
+				logger.WithContext(sc.ctx).Debugf("failed to release credential cache lease. %v", relErr)
+			}
+		}(lease)
+
+		err = tryAuthenticateWithConfig(lease, sc)
+		if err == nil {
+			return nil
+		}
+		var leaseErr *LeaseError
+		if lease.RelaxedReadAllowed && errors.As(err, &leaseErr) && leaseErr.Code == ErrFailedToRenewLease {
+			if lease, err = credentialsStorage.acquireLease(); err == nil {
+				continue
+			}
+		}
+		return err
+	}
+	return err
+}
+
+func tryAuthenticateWithConfig(lease *Lease, sc *snowflakeConn) error {
 	var authData *authResponseMain
 	var samlResponse []byte
 	var proofKey []byte
@@ -767,7 +814,7 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 				valueAwaiter := valueAwaitHolder.get(idTokenLockKey)
 				defer valueAwaiter.resumeOne()
 				sc.idToken, _ = awaitValue(valueAwaiter, func() (string, error) {
-					credential := credentialsStorage.getCredential(newIDTokenSpec(sc.cfg))
+					credential, _ := credentialsStorage.getCredential(lease, newIDTokenSpec(sc.cfg))
 					return credential, nil
 				}, func(s string, err error) bool {
 					return s != ""
@@ -775,7 +822,7 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 					return ""
 				})
 			} else if sc.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
-				sc.idToken = credentialsStorage.getCredential(newIDTokenSpec(sc.cfg))
+				sc.idToken, _ = credentialsStorage.getCredential(lease, newIDTokenSpec(sc.cfg))
 			}
 		}
 		// Disable console login by default
@@ -795,7 +842,10 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 			valueAwaiter := valueAwaitHolder.get(mfaTokenLockKey)
 			defer valueAwaiter.resumeOne()
 			sc.mfaToken, _ = awaitValue(valueAwaiter, func() (string, error) {
-				credential := credentialsStorage.getCredential(newMfaTokenSpec(sc.cfg))
+				credential, err := credentialsStorage.getCredential(lease, newMfaTokenSpec(sc.cfg))
+				if err != nil {
+					logger.WithContext(sc.ctx).Warnf("failed to get MFA token from credential storage: %v", err)
+				}
 				return credential, nil
 			}, func(s string, err error) bool {
 				return s != ""
@@ -803,7 +853,11 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 				return ""
 			})
 		} else if sc.cfg.ClientRequestMfaToken == ConfigBoolTrue {
-			sc.mfaToken = credentialsStorage.getCredential(newMfaTokenSpec(sc.cfg))
+			tok, err := credentialsStorage.getCredential(lease, newMfaTokenSpec(sc.cfg))
+			if err != nil {
+				logger.WithContext(sc.ctx).Warnf("failed to get MFA token from credential storage: %v", err)
+			}
+			sc.mfaToken = tok
 		}
 	}
 
@@ -817,6 +871,7 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 			}
 			samlResponse, proofKey, err = authenticateByExternalBrowser(
 				sc.ctx,
+				lease,
 				sc.rest,
 				sc.cfg.Authenticator.String(),
 				sc.cfg.Application,
@@ -832,6 +887,7 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 	}
 	authData, err = authenticate(
 		sc.ctx,
+		lease,
 		sc,
 		samlResponse,
 		proofKey)
@@ -851,10 +907,13 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 		// past an active backoff. Consider gating once the lease lands and the
 		// escalate-vs-terminate signal is settled.
 		case shouldRetryWithFreshExternalBrowserLogin(sc.cfg.Authenticator, sc.idToken):
-			credentialsStorage.deleteCredential(newIDTokenSpec(sc.cfg))
+			if err := credentialsStorage.deleteCredential(lease, newIDTokenSpec(sc.cfg)); err != nil && lease.RelaxedReadAllowed {
+				return err
+			}
 			sc.idToken = ""
 			samlResponse, proofKey, err = authenticateByExternalBrowser(
 				sc.ctx,
+				lease,
 				sc.rest,
 				sc.cfg.Authenticator.String(),
 				sc.cfg.Application,
@@ -866,7 +925,7 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 				sc.cleanup() // sign-in did not complete; stays retryable, no backoff
 				return err
 			}
-			authData, err = authenticate(sc.ctx, sc, samlResponse, proofKey)
+			authData, err = authenticate(sc.ctx, lease, sc, samlResponse, proofKey)
 			if err == nil {
 				break
 			}
@@ -876,15 +935,15 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 			// Re-asserted: a fallthrough from above enters here without evaluating
 			// the guard.
 			if isOAuthRefreshable(err) {
-				credentialsStorage.deleteCredential(newOAuthAccessTokenSpec(sc.cfg))
+				credentialsStorage.deleteCredential(lease, newOAuthAccessTokenSpec(sc.cfg))
 
 				if sc.cfg.Authenticator == AuthTypeOAuthAuthorizationCode {
-					doRefreshTokenWithLock(sc)
+					doRefreshTokenWithLock(sc, lease)
 				}
 
 				// if refreshing succeeds for authorization code, we will take a token from cache
 				// if it fails, we will just run the full flow
-				authData, err = authenticate(sc.ctx, sc, nil, nil)
+				authData, err = authenticate(sc.ctx, lease, sc, nil, nil)
 			}
 			if err == nil {
 				break
@@ -917,15 +976,15 @@ func authenticateWithConfig(sc *snowflakeConn) error {
 	return nil
 }
 
-func doRefreshTokenWithLock(sc *snowflakeConn) {
+func doRefreshTokenWithLock(sc *snowflakeConn, lease *Lease) {
 	if oauthClient, err := newOauthClient(sc.ctx, sc.cfg, sc); err != nil {
 		logger.Warnf("failed to create oauth client. %v", err)
 	} else {
 		lockKey := newOAuthRefreshTokenSpec(sc.cfg)
 		if _, err = getValueWithLock(chooseLockerForAuth(sc.cfg), lockKey, func() (string, error) {
-			if err = oauthClient.refreshToken(); err != nil {
+			if err = oauthClient.refreshToken(lease); err != nil {
 				logger.Warnf("cannot refresh token. %v", err)
-				credentialsStorage.deleteCredential(newOAuthRefreshTokenSpec(sc.cfg))
+				credentialsStorage.deleteCredential(lease, newOAuthRefreshTokenSpec(sc.cfg))
 				return "", err
 			}
 			return "", nil

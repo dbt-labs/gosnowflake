@@ -98,17 +98,17 @@ func TestUnitAuthenticateByExternalBrowser(t *testing.T) {
 		FuncPostAuthSAML: postAuthExternalBrowserError,
 		TokenAccessor:    getSimpleTokenAccessor(),
 	}
-	_, _, err := authenticateByExternalBrowser(context.Background(), sr, authenticator, application, account, user, timeout, ConfigBoolTrue)
+	_, _, err := authenticateByExternalBrowser(context.Background(), testLease(t), sr, authenticator, application, account, user, timeout, ConfigBoolTrue)
 	if err == nil {
 		t.Fatal("should have failed.")
 	}
 	sr.FuncPostAuthSAML = postAuthExternalBrowserFail
-	_, _, err = authenticateByExternalBrowser(context.Background(), sr, authenticator, application, account, user, timeout, ConfigBoolTrue)
+	_, _, err = authenticateByExternalBrowser(context.Background(), testLease(t), sr, authenticator, application, account, user, timeout, ConfigBoolTrue)
 	if err == nil {
 		t.Fatal("should have failed.")
 	}
 	sr.FuncPostAuthSAML = postAuthExternalBrowserFailWithCode
-	_, _, err = authenticateByExternalBrowser(context.Background(), sr, authenticator, application, account, user, timeout, ConfigBoolTrue)
+	_, _, err = authenticateByExternalBrowser(context.Background(), testLease(t), sr, authenticator, application, account, user, timeout, ConfigBoolTrue)
 	if err == nil {
 		t.Fatal("should have failed.")
 	}
@@ -134,7 +134,7 @@ func TestAuthenticationTimeout(t *testing.T) {
 		FuncPostAuthSAML: postAuthExternalBrowserErrorDelayed,
 		TokenAccessor:    getSimpleTokenAccessor(),
 	}
-	_, _, err := authenticateByExternalBrowser(context.Background(), sr, authenticator, application, account, user, timeout, ConfigBoolTrue)
+	_, _, err := authenticateByExternalBrowser(context.Background(), testLease(t), sr, authenticator, application, account, user, timeout, ConfigBoolTrue)
 	assertEqualE(t, err.Error(), "authentication timed out", err.Error())
 }
 
@@ -311,8 +311,7 @@ func TestDoAuthenticateByExternalBrowserManualToken(t *testing.T) {
 
 		done := make(chan authenticateByExternalBrowserResult, 1)
 		go func() {
-			done <- doAuthenticateByExternalBrowser(
-				context.Background(), sr, "EXTERNALBROWSER", "testapp", "testaccount", "u", ConfigBoolFalse)
+			done <- doAuthenticateByExternalBrowser(context.Background(), testLease(t), sr, "EXTERNALBROWSER", "testapp", "testaccount", "u", ConfigBoolFalse)
 		}()
 
 		select {
@@ -337,8 +336,7 @@ func TestDoAuthenticateByExternalBrowserManualToken(t *testing.T) {
 			TokenAccessor: getSimpleTokenAccessor(),
 		}
 
-		result := doAuthenticateByExternalBrowser(
-			context.Background(), sr, "EXTERNALBROWSER", "testapp", "testaccount", "u", ConfigBoolFalse)
+		result := doAuthenticateByExternalBrowser(context.Background(), testLease(t), sr, "EXTERNALBROWSER", "testapp", "testaccount", "u", ConfigBoolFalse)
 		assertNilF(t, result.err, "manual token flow should not error")
 		assertEqualE(t, string(result.escapedSamlResponse), "a+b")
 	})
@@ -355,8 +353,7 @@ func TestDoAuthenticateByExternalBrowserManualToken(t *testing.T) {
 			TokenAccessor: getSimpleTokenAccessor(),
 		}
 
-		result := doAuthenticateByExternalBrowser(
-			context.Background(), sr, "EXTERNALBROWSER", "testapp", "testaccount", "u", ConfigBoolFalse)
+		result := doAuthenticateByExternalBrowser(context.Background(), testLease(t), sr, "EXTERNALBROWSER", "testapp", "testaccount", "u", ConfigBoolFalse)
 		assertNotNilF(t, result.err, "provider error should propagate")
 		assertEqualE(t, result.err.Error(), "no browser and no tty")
 	})

@@ -39,14 +39,14 @@ func TestUnitOAuthAuthorizationCode(t *testing.T) {
 	refreshTokenSpec := newOAuthRefreshTokenSpec(cfg)
 
 	t.Run("Success", func(t *testing.T) {
-		credentialsStorage.deleteCredential(accessTokenSpec)
-		credentialsStorage.deleteCredential(refreshTokenSpec)
+		testDeleteCredential(t, accessTokenSpec)
+		testDeleteCredential(t, refreshTokenSpec)
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/authorization_code/successful_flow.json"))
 		authCodeProvider := &nonInteractiveAuthorizationCodeProvider{t: t}
 		client.authorizationCodeProviderFactory = func() authorizationCodeProvider {
 			return authCodeProvider
 		}
-		token, err := client.authenticateByOAuthAuthorizationCode()
+		token, err := client.authenticateByOAuthAuthorizationCode(testLease(t))
 		assertNilF(t, err)
 		assertEqualE(t, token, "access-token-123")
 		time.Sleep(100 * time.Millisecond)
@@ -56,22 +56,22 @@ func TestUnitOAuthAuthorizationCode(t *testing.T) {
 	t.Run("Store access token in cache", func(t *testing.T) {
 		skipOnMissingHome(t)
 		roundTripper.reset()
-		credentialsStorage.deleteCredential(accessTokenSpec)
-		credentialsStorage.deleteCredential(refreshTokenSpec)
+		testDeleteCredential(t, accessTokenSpec)
+		testDeleteCredential(t, refreshTokenSpec)
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/authorization_code/successful_flow.json"))
 		authCodeProvider := &nonInteractiveAuthorizationCodeProvider{t: t}
 		client.authorizationCodeProviderFactory = func() authorizationCodeProvider {
 			return authCodeProvider
 		}
-		_, err = client.authenticateByOAuthAuthorizationCode()
+		_, err = client.authenticateByOAuthAuthorizationCode(testLease(t))
 		assertNilF(t, err)
-		assertEqualE(t, credentialsStorage.getCredential(accessTokenSpec), "access-token-123")
+		assertEqualE(t, testGetCredential(t, accessTokenSpec), "access-token-123")
 	})
 
 	t.Run("Use cache for consecutive calls", func(t *testing.T) {
 		skipOnMissingHome(t)
 		roundTripper.reset()
-		credentialsStorage.setCredential(accessTokenSpec, "access-token-123")
+		testSetCredential(t, accessTokenSpec, "access-token-123")
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/authorization_code/successful_flow.json"))
 		authCodeProvider := &nonInteractiveAuthorizationCodeProvider{t: t}
 		for range 3 {
@@ -80,7 +80,7 @@ func TestUnitOAuthAuthorizationCode(t *testing.T) {
 			client.authorizationCodeProviderFactory = func() authorizationCodeProvider {
 				return authCodeProvider
 			}
-			_, err = client.authenticateByOAuthAuthorizationCode()
+			_, err = client.authenticateByOAuthAuthorizationCode(testLease(t))
 			assertNilF(t, err)
 		}
 		assertEqualE(t, authCodeProvider.responseBody, "")
@@ -88,8 +88,8 @@ func TestUnitOAuthAuthorizationCode(t *testing.T) {
 	})
 
 	t.Run("InvalidState", func(t *testing.T) {
-		credentialsStorage.deleteCredential(accessTokenSpec)
-		credentialsStorage.deleteCredential(refreshTokenSpec)
+		testDeleteCredential(t, accessTokenSpec)
+		testDeleteCredential(t, refreshTokenSpec)
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/authorization_code/successful_flow.json"))
 		authCodeProvider := &nonInteractiveAuthorizationCodeProvider{
 			tamperWithState: true,
@@ -98,21 +98,21 @@ func TestUnitOAuthAuthorizationCode(t *testing.T) {
 		client.authorizationCodeProviderFactory = func() authorizationCodeProvider {
 			return authCodeProvider
 		}
-		_, err = client.authenticateByOAuthAuthorizationCode()
+		_, err = client.authenticateByOAuthAuthorizationCode(testLease(t))
 		assertEqualE(t, err.Error(), "invalid oauth state received")
 		time.Sleep(100 * time.Millisecond)
 		authCodeProvider.assertResponseBodyContains("invalid oauth state received")
 	})
 
 	t.Run("ErrorFromIdPWhileGettingCode", func(t *testing.T) {
-		credentialsStorage.deleteCredential(accessTokenSpec)
-		credentialsStorage.deleteCredential(refreshTokenSpec)
+		testDeleteCredential(t, accessTokenSpec)
+		testDeleteCredential(t, refreshTokenSpec)
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/authorization_code/error_from_idp.json"))
 		authCodeProvider := &nonInteractiveAuthorizationCodeProvider{t: t}
 		client.authorizationCodeProviderFactory = func() authorizationCodeProvider {
 			return authCodeProvider
 		}
-		_, err = client.authenticateByOAuthAuthorizationCode()
+		_, err = client.authenticateByOAuthAuthorizationCode(testLease(t))
 		assertEqualE(t, err.Error(), "error while getting authentication from oauth: some error. Details: some error desc")
 		time.Sleep(100 * time.Millisecond)
 		authCodeProvider.assertResponseBodyContains("error while getting authentication from oauth: some error. Details: some error desc")
@@ -125,19 +125,19 @@ func TestUnitOAuthAuthorizationCode(t *testing.T) {
 		client.authorizationCodeProviderFactory = func() authorizationCodeProvider {
 			return authCodeProvider
 		}
-		_, err = client.authenticateByOAuthAuthorizationCode()
+		_, err = client.authenticateByOAuthAuthorizationCode(testLease(t))
 		assertEqualE(t, err.Error(), "test error")
 	})
 
 	t.Run("InvalidCode", func(t *testing.T) {
-		credentialsStorage.deleteCredential(accessTokenSpec)
-		credentialsStorage.deleteCredential(refreshTokenSpec)
+		testDeleteCredential(t, accessTokenSpec)
+		testDeleteCredential(t, refreshTokenSpec)
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/authorization_code/invalid_code.json"))
 		authCodeProvider := &nonInteractiveAuthorizationCodeProvider{t: t}
 		client.authorizationCodeProviderFactory = func() authorizationCodeProvider {
 			return authCodeProvider
 		}
-		_, err = client.authenticateByOAuthAuthorizationCode()
+		_, err = client.authenticateByOAuthAuthorizationCode(testLease(t))
 		assertNotNilE(t, err)
 		assertEqualE(t, err.(*oauth2.RetrieveError).ErrorCode, "invalid_grant")
 		assertEqualE(t, err.(*oauth2.RetrieveError).ErrorDescription, "The authorization code is invalid or has expired.")
@@ -146,8 +146,8 @@ func TestUnitOAuthAuthorizationCode(t *testing.T) {
 	})
 
 	t.Run("timeout", func(t *testing.T) {
-		credentialsStorage.deleteCredential(accessTokenSpec)
-		credentialsStorage.deleteCredential(refreshTokenSpec)
+		testDeleteCredential(t, accessTokenSpec)
+		testDeleteCredential(t, refreshTokenSpec)
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/authorization_code/successful_flow.json"))
 		client.cfg.ExternalBrowserTimeout = 2 * time.Second
 		authCodeProvider := &nonInteractiveAuthorizationCodeProvider{
@@ -158,7 +158,7 @@ func TestUnitOAuthAuthorizationCode(t *testing.T) {
 		client.authorizationCodeProviderFactory = func() authorizationCodeProvider {
 			return authCodeProvider
 		}
-		_, err = client.authenticateByOAuthAuthorizationCode()
+		_, err = client.authenticateByOAuthAuthorizationCode(testLease(t))
 		assertNotNilE(t, err)
 		assertStringContainsE(t, err.Error(), "timed out")
 		time.Sleep(2 * time.Second) // awaiting timeout
@@ -189,9 +189,9 @@ func TestUnitOAuthClientCredentials(t *testing.T) {
 	assertNilF(t, err)
 
 	t.Run("success", func(t *testing.T) {
-		credentialsStorage.deleteCredential(cacheTokenSpec)
+		testDeleteCredential(t, cacheTokenSpec)
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/client_credentials/successful_flow.json"))
-		token, err := client.authenticateByOAuthClientCredentials()
+		token, err := client.authenticateByOAuthClientCredentials(testLease(t))
 		assertNilF(t, err)
 		assertEqualE(t, token, "access-token-123")
 	})
@@ -199,15 +199,15 @@ func TestUnitOAuthClientCredentials(t *testing.T) {
 	t.Run("should store token in cache", func(t *testing.T) {
 		skipOnMissingHome(t)
 		crt.reset()
-		credentialsStorage.deleteCredential(cacheTokenSpec)
+		testDeleteCredential(t, cacheTokenSpec)
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/client_credentials/successful_flow.json"))
-		token, err := client.authenticateByOAuthClientCredentials()
+		token, err := client.authenticateByOAuthClientCredentials(testLease(t))
 		assertNilF(t, err)
 		assertEqualE(t, token, "access-token-123")
 
 		client, err := newOauthClient(context.Background(), cfgFactory(), &snowflakeConn{})
 		assertNilF(t, err)
-		token, err = client.authenticateByOAuthClientCredentials()
+		token, err = client.authenticateByOAuthClientCredentials(testLease(t))
 		assertNilF(t, err)
 		assertEqualE(t, token, "access-token-123")
 
@@ -217,11 +217,11 @@ func TestUnitOAuthClientCredentials(t *testing.T) {
 	t.Run("consecutive calls should take token from cache", func(t *testing.T) {
 		skipOnMissingHome(t)
 		crt.reset()
-		credentialsStorage.setCredential(cacheTokenSpec, "access-token-123")
+		testSetCredential(t, cacheTokenSpec, "access-token-123")
 		for range 3 {
 			client, err := newOauthClient(context.Background(), cfgFactory(), &snowflakeConn{})
 			assertNilF(t, err)
-			token, err := client.authenticateByOAuthClientCredentials()
+			token, err := client.authenticateByOAuthClientCredentials(testLease(t))
 			assertNilF(t, err)
 			assertEqualE(t, token, "access-token-123")
 		}
@@ -232,17 +232,17 @@ func TestUnitOAuthClientCredentials(t *testing.T) {
 		skipOnMissingHome(t)
 		cfg := cfgFactory()
 		cfg.ClientStoreTemporaryCredential = ConfigBoolFalse
-		credentialsStorage.deleteCredential(cacheTokenSpec)
+		testDeleteCredential(t, cacheTokenSpec)
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/client_credentials/successful_flow.json"))
 		client, err := newOauthClient(context.Background(), cfg, &snowflakeConn{})
 		assertNilF(t, err)
-		token, err := client.authenticateByOAuthClientCredentials()
+		token, err := client.authenticateByOAuthClientCredentials(testLease(t))
 		assertNilF(t, err)
 		assertEqualE(t, token, "access-token-123")
 
 		client, err = newOauthClient(context.Background(), cfg, &snowflakeConn{})
 		assertNilF(t, err)
-		token, err = client.authenticateByOAuthClientCredentials()
+		token, err = client.authenticateByOAuthClientCredentials(testLease(t))
 		assertNilF(t, err)
 		assertEqualE(t, token, "access-token-123")
 
@@ -250,9 +250,9 @@ func TestUnitOAuthClientCredentials(t *testing.T) {
 	})
 
 	t.Run("invalid_client", func(t *testing.T) {
-		credentialsStorage.deleteCredential(cacheTokenSpec)
+		testDeleteCredential(t, cacheTokenSpec)
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/client_credentials/invalid_client.json"))
-		_, err = client.authenticateByOAuthClientCredentials()
+		_, err = client.authenticateByOAuthClientCredentials(testLease(t))
 		assertNotNilF(t, err)
 		oauth2Err := err.(*oauth2.RetrieveError)
 		assertEqualE(t, oauth2Err.ErrorCode, "invalid_client")
@@ -289,8 +289,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		cfg.Transporter = roundTripper
 		oauthAccessTokenSpec := newOAuthAccessTokenSpec(cfg)
 		oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg)
-		credentialsStorage.deleteCredential(oauthAccessTokenSpec)
-		credentialsStorage.deleteCredential(oauthRefreshTokenSpec)
+		testDeleteCredential(t, oauthAccessTokenSpec)
+		testDeleteCredential(t, oauthRefreshTokenSpec)
 		connector := NewConnector(SnowflakeDriver{}, *cfg)
 		db := sql.OpenDB(connector)
 		runSmokeQuery(t, db)
@@ -323,8 +323,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 				cfg.SingleAuthenticationPrompt = singleAuthenticationPrompt
 				oauthAccessTokenSpec := newOAuthAccessTokenSpec(cfg)
 				oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg)
-				credentialsStorage.deleteCredential(oauthAccessTokenSpec)
-				credentialsStorage.deleteCredential(oauthRefreshTokenSpec)
+				testDeleteCredential(t, oauthAccessTokenSpec)
+				testDeleteCredential(t, oauthRefreshTokenSpec)
 				connector := NewConnector(SnowflakeDriver{}, *cfg)
 				db := sql.OpenDB(connector)
 				initPoolWithSize(t, db, 20)
@@ -351,8 +351,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		cfg.EnableSingleUseRefreshTokens = true
 		oauthAccessTokenSpec := newOAuthAccessTokenSpec(cfg)
 		oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg)
-		credentialsStorage.deleteCredential(oauthAccessTokenSpec)
-		credentialsStorage.deleteCredential(oauthRefreshTokenSpec)
+		testDeleteCredential(t, oauthAccessTokenSpec)
+		testDeleteCredential(t, oauthRefreshTokenSpec)
 		connector := NewConnector(SnowflakeDriver{}, *cfg)
 		db := sql.OpenDB(connector)
 		runSmokeQuery(t, db)
@@ -371,8 +371,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		cfg.Transporter = roundTripper
 		oauthAccessTokenSpec := newOAuthAccessTokenSpec(cfg)
 		oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg)
-		credentialsStorage.deleteCredential(oauthAccessTokenSpec)
-		credentialsStorage.deleteCredential(oauthRefreshTokenSpec)
+		testDeleteCredential(t, oauthAccessTokenSpec)
+		testDeleteCredential(t, oauthRefreshTokenSpec)
 		connector := NewConnector(SnowflakeDriver{}, *cfg)
 		db := sql.OpenDB(connector)
 		conn1, err := db.Conn(context.Background())
@@ -400,13 +400,13 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		cfg.Transporter = roundTripper
 		oauthAccessTokenSpec := newOAuthAccessTokenSpec(cfg)
 		oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg)
-		credentialsStorage.setCredential(oauthAccessTokenSpec, "expired-token")
-		credentialsStorage.deleteCredential(oauthRefreshTokenSpec)
+		testSetCredential(t, oauthAccessTokenSpec, "expired-token")
+		testDeleteCredential(t, oauthRefreshTokenSpec)
 		connector := NewConnector(SnowflakeDriver{}, *cfg)
 		db := sql.OpenDB(connector)
 		runSmokeQuery(t, db)
 		assertEqualE(t, roundTripper.postReqCount[cfg.OauthTokenRequestURL], 1)
-		assertEqualE(t, credentialsStorage.getCredential(oauthAccessTokenSpec), "access-token-123")
+		assertEqualE(t, testGetCredential(t, oauthAccessTokenSpec), "access-token-123")
 	})
 
 	t.Run("if access token is missing and refresh token is present, should run refresh token flow", func(t *testing.T) {
@@ -418,8 +418,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		cfg.Transporter = roundTripper
 		oauthAccessTokenSpec := newOAuthAccessTokenSpec(cfg)
 		oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg)
-		credentialsStorage.deleteCredential(oauthAccessTokenSpec)
-		credentialsStorage.setCredential(oauthRefreshTokenSpec, "refresh-token-123")
+		testDeleteCredential(t, oauthAccessTokenSpec)
+		testSetCredential(t, oauthRefreshTokenSpec, "refresh-token-123")
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/login_request_with_expired_access_token.json"),
 			newWiremockMapping("auth/oauth2/refresh_token/successful_flow.json"),
 			newWiremockMapping("auth/oauth2/authorization_code/successful_flow.json"),
@@ -429,8 +429,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		db := sql.OpenDB(connector)
 		runSmokeQuery(t, db)
 		assertEqualE(t, roundTripper.postReqCount[cfg.OauthTokenRequestURL], 1) // only refresh token
-		assertEqualE(t, credentialsStorage.getCredential(oauthAccessTokenSpec), "access-token-123")
-		assertEqualE(t, credentialsStorage.getCredential(oauthRefreshTokenSpec), "refresh-token-123a")
+		assertEqualE(t, testGetCredential(t, oauthAccessTokenSpec), "access-token-123")
+		assertEqualE(t, testGetCredential(t, oauthRefreshTokenSpec), "refresh-token-123a")
 	})
 
 	t.Run("if access token is expired and refresh token is present, should run refresh token flow", func(t *testing.T) {
@@ -442,8 +442,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		cfg.Transporter = roundTripper
 		oauthAccessTokenSpec := newOAuthAccessTokenSpec(cfg)
 		oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg)
-		credentialsStorage.setCredential(oauthAccessTokenSpec, "expired-token")
-		credentialsStorage.setCredential(oauthRefreshTokenSpec, "refresh-token-123")
+		testSetCredential(t, oauthAccessTokenSpec, "expired-token")
+		testSetCredential(t, oauthRefreshTokenSpec, "refresh-token-123")
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/login_request_with_expired_access_token.json"),
 			newWiremockMapping("auth/oauth2/refresh_token/successful_flow.json"),
 			newWiremockMapping("auth/oauth2/authorization_code/successful_flow.json"),
@@ -453,8 +453,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		db := sql.OpenDB(connector)
 		runSmokeQuery(t, db)
 		assertEqualE(t, roundTripper.postReqCount[cfg.OauthTokenRequestURL], 1) // only refresh token
-		assertEqualE(t, credentialsStorage.getCredential(oauthAccessTokenSpec), "access-token-123")
-		assertEqualE(t, credentialsStorage.getCredential(oauthRefreshTokenSpec), "refresh-token-123a")
+		assertEqualE(t, testGetCredential(t, oauthAccessTokenSpec), "access-token-123")
+		assertEqualE(t, testGetCredential(t, oauthRefreshTokenSpec), "refresh-token-123a")
 	})
 
 	t.Run("if new refresh token is not returned, should keep old one", func(t *testing.T) {
@@ -466,8 +466,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		cfg.Transporter = roundTripper
 		oauthAccessTokenSpec := newOAuthAccessTokenSpec(cfg)
 		oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg)
-		credentialsStorage.setCredential(oauthAccessTokenSpec, "expired-token")
-		credentialsStorage.setCredential(oauthRefreshTokenSpec, "refresh-token-123")
+		testSetCredential(t, oauthAccessTokenSpec, "expired-token")
+		testSetCredential(t, oauthRefreshTokenSpec, "refresh-token-123")
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/login_request_with_expired_access_token.json"),
 			newWiremockMapping("auth/oauth2/refresh_token/successful_flow_without_new_refresh_token.json"),
 			newWiremockMapping("auth/oauth2/authorization_code/successful_flow.json"),
@@ -477,8 +477,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		db := sql.OpenDB(connector)
 		runSmokeQuery(t, db)
 		assertEqualE(t, roundTripper.postReqCount[cfg.OauthTokenRequestURL], 1) // only refresh token
-		assertEqualE(t, credentialsStorage.getCredential(oauthAccessTokenSpec), "access-token-123")
-		assertEqualE(t, credentialsStorage.getCredential(oauthRefreshTokenSpec), "refresh-token-123")
+		assertEqualE(t, testGetCredential(t, oauthAccessTokenSpec), "access-token-123")
+		assertEqualE(t, testGetCredential(t, oauthRefreshTokenSpec), "refresh-token-123")
 	})
 
 	t.Run("if refreshing token failed, run normal flow", func(t *testing.T) {
@@ -490,8 +490,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		cfg.Transporter = roundTripper
 		oauthAccessTokenSpec := newOAuthAccessTokenSpec(cfg)
 		oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg)
-		credentialsStorage.setCredential(oauthAccessTokenSpec, "expired-token")
-		credentialsStorage.setCredential(oauthRefreshTokenSpec, "expired-refresh-token")
+		testSetCredential(t, oauthAccessTokenSpec, "expired-token")
+		testSetCredential(t, oauthRefreshTokenSpec, "expired-refresh-token")
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/login_request_with_expired_access_token.json"),
 			newWiremockMapping("auth/oauth2/refresh_token/invalid_refresh_token.json"),
 			newWiremockMapping("auth/oauth2/authorization_code/successful_flow_with_offline_access.json"),
@@ -501,8 +501,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		db := sql.OpenDB(connector)
 		runSmokeQuery(t, db)
 		assertEqualE(t, roundTripper.postReqCount[cfg.OauthTokenRequestURL], 2) // only refresh token fails, then authorization code
-		assertEqualE(t, credentialsStorage.getCredential(oauthAccessTokenSpec), "access-token-123")
-		assertEqualE(t, credentialsStorage.getCredential(oauthRefreshTokenSpec), "refresh-token-123")
+		assertEqualE(t, testGetCredential(t, oauthAccessTokenSpec), "access-token-123")
+		assertEqualE(t, testGetCredential(t, oauthRefreshTokenSpec), "refresh-token-123")
 	})
 
 	t.Run("if secure storage is disabled, run normal flow", func(t *testing.T) {
@@ -515,8 +515,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		cfg.ClientStoreTemporaryCredential = ConfigBoolFalse
 		oauthAccessTokenSpec := newOAuthAccessTokenSpec(cfg)
 		oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg)
-		credentialsStorage.setCredential(oauthAccessTokenSpec, "old-access-token")
-		credentialsStorage.setCredential(oauthRefreshTokenSpec, "old-refresh-token")
+		testSetCredential(t, oauthAccessTokenSpec, "old-access-token")
+		testSetCredential(t, oauthRefreshTokenSpec, "old-refresh-token")
 		wiremock.registerMappings(t, newWiremockMapping("auth/oauth2/authorization_code/successful_flow_with_offline_access.json"),
 			newWiremockMapping("auth/oauth2/login_request.json"),
 			newWiremockMapping("select1.json"))
@@ -524,8 +524,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		db := sql.OpenDB(connector)
 		runSmokeQuery(t, db)
 		assertEqualE(t, roundTripper.postReqCount[cfg.OauthTokenRequestURL], 1) // only access token token
-		assertEqualE(t, credentialsStorage.getCredential(oauthAccessTokenSpec), "old-access-token")
-		assertEqualE(t, credentialsStorage.getCredential(oauthRefreshTokenSpec), "old-refresh-token")
+		assertEqualE(t, testGetCredential(t, oauthAccessTokenSpec), "old-access-token")
+		assertEqualE(t, testGetCredential(t, oauthRefreshTokenSpec), "old-refresh-token")
 	})
 }
 
@@ -555,7 +555,7 @@ func TestClientCredentialsFlow(t *testing.T) {
 	oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg)
 
 	t.Run("successful flow", func(t *testing.T) {
-		credentialsStorage.deleteCredential(oauthAccessTokenSpec)
+		testDeleteCredential(t, oauthAccessTokenSpec)
 		wiremock.registerMappings(t,
 			newWiremockMapping("auth/oauth2/client_credentials/successful_flow.json"),
 			newWiremockMapping("auth/oauth2/login_request.json"),
@@ -571,7 +571,7 @@ func TestClientCredentialsFlow(t *testing.T) {
 			newWiremockMapping("auth/oauth2/client_credentials/successful_flow.json"),
 			newWiremockMapping("auth/oauth2/login_request.json"),
 			newWiremockMapping("select1.json"))
-		credentialsStorage.deleteCredential(oauthAccessTokenSpec)
+		testDeleteCredential(t, oauthAccessTokenSpec)
 		connector := NewConnector(SnowflakeDriver{}, *cfg)
 		db := sql.OpenDB(connector)
 		conn1, err := db.Conn(context.Background())
@@ -593,12 +593,12 @@ func TestClientCredentialsFlow(t *testing.T) {
 			newWiremockMapping("auth/oauth2/login_request.json"),
 			newWiremockMapping("select1.json"))
 
-		credentialsStorage.setCredential(oauthAccessTokenSpec, "expired-token")
+		testSetCredential(t, oauthAccessTokenSpec, "expired-token")
 		connector := NewConnector(SnowflakeDriver{}, *cfg)
 		db := sql.OpenDB(connector)
 		runSmokeQuery(t, db)
 		assertEqualE(t, roundTripper.postReqCount[cfg.OauthTokenRequestURL], 1)
-		assertEqualE(t, credentialsStorage.getCredential(oauthAccessTokenSpec), "access-token-123")
+		assertEqualE(t, testGetCredential(t, oauthAccessTokenSpec), "access-token-123")
 	})
 
 	t.Run("should not use refresh token, but ask for fresh access token", func(t *testing.T) {
@@ -609,14 +609,14 @@ func TestClientCredentialsFlow(t *testing.T) {
 			newWiremockMapping("auth/oauth2/login_request.json"),
 			newWiremockMapping("select1.json"))
 
-		credentialsStorage.setCredential(oauthAccessTokenSpec, "expired-token")
-		credentialsStorage.setCredential(oauthRefreshTokenSpec, "refresh-token-123")
+		testSetCredential(t, oauthAccessTokenSpec, "expired-token")
+		testSetCredential(t, oauthRefreshTokenSpec, "refresh-token-123")
 		connector := NewConnector(SnowflakeDriver{}, *cfg)
 		db := sql.OpenDB(connector)
 		runSmokeQuery(t, db)
 		assertEqualE(t, roundTripper.postReqCount[cfg.OauthTokenRequestURL], 1)
-		assertEqualE(t, credentialsStorage.getCredential(oauthAccessTokenSpec), "access-token-123")
-		assertEqualE(t, credentialsStorage.getCredential(oauthRefreshTokenSpec), "refresh-token-123")
+		assertEqualE(t, testGetCredential(t, oauthAccessTokenSpec), "access-token-123")
+		assertEqualE(t, testGetCredential(t, oauthRefreshTokenSpec), "refresh-token-123")
 	})
 
 	t.Run("should not use access token if token cache is disabled", func(t *testing.T) {
@@ -627,13 +627,13 @@ func TestClientCredentialsFlow(t *testing.T) {
 			newWiremockMapping("auth/oauth2/login_request.json"),
 			newWiremockMapping("select1.json"))
 
-		credentialsStorage.setCredential(oauthAccessTokenSpec, "access-token-123")
+		testSetCredential(t, oauthAccessTokenSpec, "access-token-123")
 		cfg.ClientStoreTemporaryCredential = ConfigBoolFalse
 		connector := NewConnector(SnowflakeDriver{}, *cfg)
 		db := sql.OpenDB(connector)
 		runSmokeQuery(t, db)
 		assertEqualE(t, roundTripper.postReqCount[cfg.OauthTokenRequestURL], 1)
-		assertEqualE(t, credentialsStorage.getCredential(oauthAccessTokenSpec), "access-token-123")
+		assertEqualE(t, testGetCredential(t, oauthAccessTokenSpec), "access-token-123")
 	})
 }
 

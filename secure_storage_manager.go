@@ -10,9 +10,11 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -31,7 +33,58 @@ const (
 const (
 	credCacheDirEnv   = "SF_TEMPORARY_CREDENTIAL_CACHE_DIR"
 	credCacheFileName = "credential_cache_v1.json"
+	// dbt-only
+	credLeaseFileName = "credential_cache.lease"
+
+	// dbt-only: reached through leaseTTL/leaseOperationTimeout, which apply any
+	// ConfigureLeaseOnce override. Do not read directly.
+	_defaultLeaseTTL              = 30 * time.Second
+	_defaultLeaseOperationTimeout = 90 * time.Second
 )
+
+// dbt-only: lease tuning, set at most once per process by the embedding driver.
+var (
+	_cfgOnce         sync.Once
+	_overrideTTL     atomic.Value // time.Duration
+	_overrideTimeout atomic.Value // time.Duration
+)
+
+// ConfigureLeaseOnce tunes credential-cache lease timing for the process. Zero
+// values are ignored, leaving the default in place. Only the first call has any
+// effect.
+//
+// dbt-only: not upstream. Exists so an embedder can widen the lease beyond a
+// plain file write — an SSO login blocks on a human, so arrow-adbc asks for a
+// 30s TTL with a 90s operation timeout.
+func ConfigureLeaseOnce(ttl, timeout time.Duration) {
+	_cfgOnce.Do(func() {
+		if ttl > 0 {
+			_overrideTTL.Store(ttl)
+		}
+		if timeout > 0 {
+			_overrideTimeout.Store(timeout)
+			// The handler was built before this call, so it needs the new timeout
+			// pushed into it. Only the file-based manager owns one.
+			if fb, ok := credentialsStorage.(*fileBasedSecureStorageManager); ok && fb.leaseHandler != nil {
+				fb.leaseHandler.SetTimeout(timeout)
+			}
+		}
+	})
+}
+
+func leaseTTL() time.Duration {
+	if v := _overrideTTL.Load(); v != nil {
+		return v.(time.Duration)
+	}
+	return _defaultLeaseTTL
+}
+
+func leaseOperationTimeout() time.Duration {
+	if v := _overrideTimeout.Load(); v != nil {
+		return v.(time.Duration)
+	}
+	return _defaultLeaseOperationTimeout
+}
 
 type cacheDirConf struct {
 	envVar       string
@@ -165,9 +218,13 @@ func newOAuthRefreshTokenSpec(cfg *Config) *oauthTokenSpec {
 }
 
 type secureStorageManager interface {
-	setCredential(tokenSpec secureTokenSpec, value string)
-	getCredential(tokenSpec secureTokenSpec) string
-	deleteCredential(tokenSpec secureTokenSpec)
+	// dbt-only: every operation takes a lease, and reports failure so the caller
+	// can escalate from a relaxed read to a held lease.
+	brokenLease() *Lease
+	acquireLease() (*Lease, error)
+	setCredential(lease *Lease, tokenSpec secureTokenSpec, value string) error
+	getCredential(lease *Lease, tokenSpec secureTokenSpec) (string, error)
+	deleteCredential(lease *Lease, tokenSpec secureTokenSpec) error
 }
 
 var credentialsStorage = newSecureStorageManager()
@@ -177,7 +234,8 @@ func newSecureStorageManager() secureStorageManager {
 }
 
 type fileBasedSecureStorageManager struct {
-	credDirPath string
+	credDirPath  string
+	leaseHandler *LeaseHandler // dbt-only
 }
 
 func newFileBasedSecureStorageManager() (*fileBasedSecureStorageManager, error) {
@@ -187,10 +245,26 @@ func newFileBasedSecureStorageManager() (*fileBasedSecureStorageManager, error) 
 	if err != nil {
 		return nil, err
 	}
+	// dbt-only
+	leaseHandler, err := NewLeaseHandler(filepath.Join(credDirPath, credLeaseFileName), leaseOperationTimeout())
+	if err != nil {
+		return nil, err
+	}
 	ssm := &fileBasedSecureStorageManager{
-		credDirPath: credDirPath,
+		credDirPath:  credDirPath,
+		leaseHandler: leaseHandler,
 	}
 	return ssm, nil
+}
+
+// dbt-only
+func (ssm *fileBasedSecureStorageManager) brokenLease() *Lease {
+	return ssm.leaseHandler.BrokenLease()
+}
+
+// dbt-only
+func (ssm *fileBasedSecureStorageManager) acquireLease() (*Lease, error) {
+	return ssm.leaseHandler.Acquire(leaseTTL())
 }
 
 func lookupCacheDir(envVar string, pathSegments ...string) (string, error) {
@@ -254,22 +328,27 @@ func (ssm *fileBasedSecureStorageManager) getTokens(data map[string]any) map[str
 	return tokens
 }
 
-func (ssm *fileBasedSecureStorageManager) withLock(action func(cacheFile *os.File)) {
-	err := ssm.lockFile()
-	if err != nil {
-		logger.Warnf("Unable to lock cache. %v", err)
-		return
+// dbt-only: withLock is gone — the lease supersedes it. lockFile/unlockFile below
+// are retained for upstream tracking only and have no callers.
+
+// dbt-only: takes a lease and returns the action's error.
+//
+// relaxed skips the lease renewal, so the caller reads whatever is on disk without
+// holding the lease. It must never be set for a write.
+func (ssm *fileBasedSecureStorageManager) withCacheFile(lease *Lease, relaxed bool, action func(*os.File) error) error {
+	if !relaxed {
+		if err := lease.Renew(leaseTTL() / 2); err != nil {
+			logger.Warnf("Unable to lease cache. %v", err)
+			return err
+		}
 	}
-	defer ssm.unlockFile()
 
-	ssm.withCacheFile(action)
-}
+	const cacheFilePermissions = 0600
 
-func (ssm *fileBasedSecureStorageManager) withCacheFile(action func(*os.File)) {
-	cacheFile, err := os.OpenFile(ssm.credFilePath(), os.O_CREATE|os.O_RDWR, 0600)
+	cacheFile, err := os.OpenFile(ssm.credFilePath(), os.O_CREATE|os.O_RDWR, cacheFilePermissions)
 	if err != nil {
 		logger.Warnf("cannot access %v. %v", ssm.credFilePath(), err)
-		return
+		return err
 	}
 	defer func(file *os.File) {
 		if err := file.Close(); err != nil {
@@ -289,46 +368,72 @@ func (ssm *fileBasedSecureStorageManager) withCacheFile(action func(*os.File)) {
 
 	if sfconfig.ShouldSkipTokenFilePermissionsVerification() {
 		logger.Debugf("Skipping credential cache permission verification because SKIP_TOKEN_FILE_PERMISSIONS_VERIFICATION=true")
-		action(cacheFile)
-		return
+		return action(cacheFile)
 	}
 
-	if err := ensureFileOwner(cacheFile); err != nil {
-		logger.Warnf("failed to ensure owner for temporary cache file. %v", err)
-		return
-	}
-	if err := ensureFilePermissions(cacheFile, 0600); err != nil {
-		logger.Warnf("failed to ensure permission for temporary cache file. %v", err)
-		return
-	}
-	if err := ensureFileOwner(cacheDir); err != nil {
-		logger.Warnf("failed to ensure owner for temporary cache dir. %v", err)
-		return
-	}
-	if err := ensureFilePermissions(cacheDir, 0700|os.ModeDir); err != nil {
-		logger.Warnf("failed to ensure permission for temporary cache dir. %v", err)
-		return
+	// dbt-only: POSIX ownership and mode carry no meaning on Windows, where
+	// provideFileOwner always errors — running these there rejects every cache
+	// operation. Contents are protected by DPAPI instead.
+	if runtime.GOOS != "windows" {
+		if err := ensureFileOwner(cacheFile); err != nil {
+			logger.Warnf("failed to ensure owner for temporary cache file. %v", err)
+			return err
+		}
+		// dbt-only: a cache file left group- or world-readable by an older client
+		// is repaired rather than rejected.
+		tryRemediateFilePermissions(cacheFile, cacheFilePermissions)
+		if err := ensureFilePermissions(cacheFile, cacheFilePermissions); err != nil {
+			logger.Warnf("failed to ensure permission for temporary cache file. %v", err)
+			return err
+		}
+		if err := ensureFileOwner(cacheDir); err != nil {
+			logger.Warnf("failed to ensure owner for temporary cache dir. %v", err)
+			return err
+		}
+		if err := ensureFilePermissions(cacheDir, 0700|os.ModeDir); err != nil {
+			logger.Warnf("failed to ensure permission for temporary cache dir. %v", err)
+			return err
+		}
 	}
 
-	action(cacheFile)
+	return action(cacheFile)
 }
 
-func (ssm *fileBasedSecureStorageManager) setCredential(tokenSpec secureTokenSpec, value string) {
+// dbt-only
+func tryRemediateFilePermissions(f *os.File, expectedMode os.FileMode) {
+	info, err := f.Stat()
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logger.Warnf("could not stat %s: %v", f.Name(), err)
+		}
+		return
+	}
+	if info.Mode().Perm() == expectedMode {
+		return
+	}
+	if chmodErr := f.Chmod(expectedMode); chmodErr == nil {
+		logger.Infof("Set existing file %s to %04o permissions", f.Name(), expectedMode)
+	} else {
+		logger.Warnf("could not force %04o on existing file %s: %v", expectedMode, f.Name(), chmodErr)
+	}
+}
+
+func (ssm *fileBasedSecureStorageManager) setCredential(lease *Lease, tokenSpec secureTokenSpec, value string) error {
 	if value == "" {
 		logger.Debug("no token provided")
-		return
+		return nil
 	}
 	credentialsKey, err := tokenSpec.buildKey()
 	if err != nil {
 		logger.Warnf("cannot build token spec: %v", err)
-		return
+		return err
 	}
 
-	ssm.withLock(func(cacheFile *os.File) {
+	return ssm.withCacheFile(lease, false, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
-			return
+			return err
 		}
 		tokens := ssm.getTokens(credCache)
 		tokens[credentialsKey] = value
@@ -336,9 +441,10 @@ func (ssm *fileBasedSecureStorageManager) setCredential(tokenSpec secureTokenSpe
 		err = ssm.writeTemporaryCacheFile(credCache, cacheFile)
 		if err != nil {
 			logger.Warnf("Set credential failed. Unable to write cache. %v", err)
-		} else {
-			logger.Debugf("Set credential succeeded. Key: %v, file location: %v", credentialsKey, ssm.credFilePath())
+			return err
 		}
+		logger.Debugf("Set credential succeeded. Key: %v, file location: %v", credentialsKey, ssm.credFilePath())
+		return nil
 	})
 }
 
@@ -422,33 +528,34 @@ func (ssm *fileBasedSecureStorageManager) unlockFile() {
 	}
 }
 
-func (ssm *fileBasedSecureStorageManager) getCredential(tokenSpec secureTokenSpec) string {
+func (ssm *fileBasedSecureStorageManager) getCredential(lease *Lease, tokenSpec secureTokenSpec) (string, error) {
 	credentialsKey, err := tokenSpec.buildKey()
 	if err != nil {
 		logger.Warnf("cannot build token spec: %v", err)
-		return ""
+		return "", err
 	}
 
 	ret := ""
-	ssm.withLock(func(cacheFile *os.File) {
+	err = ssm.withCacheFile(lease, lease.RelaxedReadAllowed, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
-			return
+			return err
 		}
 		cred, ok := ssm.getTokens(credCache)[credentialsKey]
 		if !ok {
-			return
+			return nil
 		}
 
 		credStr, ok := cred.(string)
 		if !ok {
-			return
+			return nil
 		}
 
 		ret = credStr
+		return nil
 	})
-	return ret
+	return ret, err
 }
 
 func (ssm *fileBasedSecureStorageManager) credFilePath() string {
@@ -511,27 +618,28 @@ func (ssm *fileBasedSecureStorageManager) readTemporaryCacheFile(cacheFile *os.F
 	return credentialsMap, nil
 }
 
-func (ssm *fileBasedSecureStorageManager) deleteCredential(tokenSpec secureTokenSpec) {
+func (ssm *fileBasedSecureStorageManager) deleteCredential(lease *Lease, tokenSpec secureTokenSpec) error {
 	credentialsKey, err := tokenSpec.buildKey()
 	if err != nil {
 		logger.Warnf("cannot build token spec: %v", err)
-		return
+		return err
 	}
 
-	ssm.withLock(func(cacheFile *os.File) {
+	return ssm.withCacheFile(lease, false, func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)
-			return
+			return err
 		}
 		delete(ssm.getTokens(credCache), credentialsKey)
 
 		err = ssm.writeTemporaryCacheFile(credCache, cacheFile)
 		if err != nil {
 			logger.Warnf("Set credential failed. Unable to write cache. %v", err)
-		} else {
-			logger.Debugf("Deleted credential succeeded. Key: %v, file location: %v", credentialsKey, ssm.credFilePath())
+			return err
 		}
+		logger.Debugf("Deleted credential succeeded. Key: %v, file location: %v", credentialsKey, ssm.credFilePath())
+		return nil
 	})
 }
 
@@ -594,35 +702,55 @@ func newNoopSecureStorageManager() *noopSecureStorageManager {
 	return &noopSecureStorageManager{}
 }
 
-func (ssm *noopSecureStorageManager) setCredential(_ secureTokenSpec, _ string) {
+func (ssm *noopSecureStorageManager) brokenLease() *Lease {
+	return &Lease{}
 }
 
-func (ssm *noopSecureStorageManager) getCredential(_ secureTokenSpec) string {
-	return ""
+func (ssm *noopSecureStorageManager) acquireLease() (*Lease, error) {
+	return &Lease{}, nil
 }
 
-func (ssm *noopSecureStorageManager) deleteCredential(_ secureTokenSpec) {
+func (ssm *noopSecureStorageManager) setCredential(_ *Lease, _ secureTokenSpec, _ string) error {
+	return nil
 }
 
+func (ssm *noopSecureStorageManager) getCredential(_ *Lease, _ secureTokenSpec) (string, error) {
+	return "", nil
+}
+
+func (ssm *noopSecureStorageManager) deleteCredential(_ *Lease, _ secureTokenSpec) error {
+	return nil
+}
+
+// dbt-only: unreferenced, retained for upstream tracking only. Nothing constructs
+// this — the lease supersedes the mutex.
 type threadSafeSecureStorageManager struct {
 	mu       *sync.Mutex
 	delegate secureStorageManager
 }
 
-func (ssm *threadSafeSecureStorageManager) setCredential(tokenSpec secureTokenSpec, value string) {
-	ssm.mu.Lock()
-	defer ssm.mu.Unlock()
-	ssm.delegate.setCredential(tokenSpec, value)
+func (ssm *threadSafeSecureStorageManager) brokenLease() *Lease {
+	return ssm.delegate.brokenLease()
 }
 
-func (ssm *threadSafeSecureStorageManager) getCredential(tokenSpec secureTokenSpec) string {
-	ssm.mu.Lock()
-	defer ssm.mu.Unlock()
-	return ssm.delegate.getCredential(tokenSpec)
+func (ssm *threadSafeSecureStorageManager) acquireLease() (*Lease, error) {
+	return ssm.delegate.acquireLease()
 }
 
-func (ssm *threadSafeSecureStorageManager) deleteCredential(tokenSpec secureTokenSpec) {
+func (ssm *threadSafeSecureStorageManager) setCredential(lease *Lease, tokenSpec secureTokenSpec, value string) error {
 	ssm.mu.Lock()
 	defer ssm.mu.Unlock()
-	ssm.delegate.deleteCredential(tokenSpec)
+	return ssm.delegate.setCredential(lease, tokenSpec, value)
+}
+
+func (ssm *threadSafeSecureStorageManager) getCredential(lease *Lease, tokenSpec secureTokenSpec) (string, error) {
+	ssm.mu.Lock()
+	defer ssm.mu.Unlock()
+	return ssm.delegate.getCredential(lease, tokenSpec)
+}
+
+func (ssm *threadSafeSecureStorageManager) deleteCredential(lease *Lease, tokenSpec secureTokenSpec) error {
+	ssm.mu.Lock()
+	defer ssm.mu.Unlock()
+	return ssm.delegate.deleteCredential(lease, tokenSpec)
 }

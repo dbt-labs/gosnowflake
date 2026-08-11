@@ -218,13 +218,13 @@ type authenticateByExternalBrowserResult struct {
 	err                 error
 }
 
-func authenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, authenticator string, application string,
+func authenticateByExternalBrowser(ctx context.Context, lease *Lease, sr *snowflakeRestful, authenticator string, application string,
 	account string, user string, externalBrowserTimeout time.Duration, disableConsoleLogin ConfigBool) ([]byte, []byte, error) {
 	resultChan := make(chan authenticateByExternalBrowserResult, 1)
 	go GoroutineWrapper(
 		ctx,
 		func() {
-			resultChan <- doAuthenticateByExternalBrowser(ctx, sr, authenticator, application, account, user, disableConsoleLogin)
+			resultChan <- doAuthenticateByExternalBrowser(ctx, lease, sr, authenticator, application, account, user, disableConsoleLogin)
 		},
 	)
 	select {
@@ -244,7 +244,17 @@ func authenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, au
 //   - user authenticates at the IDP, and is redirected to Snowflake
 //   - Snowflake directs the user back to the driver
 //   - authenticate is complete!
-func doAuthenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, authenticator string, application string, account string, user string, disableConsoleLogin ConfigBool) authenticateByExternalBrowserResult {
+func doAuthenticateByExternalBrowser(ctx context.Context, lease *Lease, sr *snowflakeRestful, authenticator string, application string, account string, user string, disableConsoleLogin ConfigBool) authenticateByExternalBrowserResult {
+	// dbt-only: THE invariant. Never open a browser tab on the strength of a
+	// relaxed read of the credential cache -- without a held lease another process
+	// can be doing the same, and each opens its own tab at the IDP. Renewing here
+	// fails with ErrFailedToRenewLease on a broken lease, which makes the caller
+	// escalate and come back holding one.
+	if lease.RelaxedReadAllowed {
+		if err := lease.Renew(leaseTTL()); err != nil {
+			return authenticateByExternalBrowserResult{nil, nil, err}
+		}
+	}
 	l, err := createLocalTCPListener(ctx, 0)
 	if err != nil {
 		return authenticateByExternalBrowserResult{nil, nil, err}
@@ -293,26 +303,52 @@ func doAuthenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, 
 		return authenticateByExternalBrowserResult{[]byte(unescaped), []byte(proofKey), nil}
 	}
 
-	encodedSamlResponseChan := make(chan string)
-	errChan := make(chan error)
-
-	var encodedSamlResponse string
-	var errFromGoroutine error
-	conn, err := l.Accept()
+	encodedSamlResponse, err := waitForSamlResponse(ctx, lease, l, application)
 	if err != nil {
-		// dbt-only: upstream calls log.Fatal here, terminating the host process
-		// from inside a library.
-		logger.WithContext(ctx).Errorf("unable to accept connection. err: %v", err)
 		return authenticateByExternalBrowserResult{nil, nil, err}
 	}
-	go func(c net.Conn) {
+
+	escapedSamlResponse, err := url.QueryUnescape(encodedSamlResponse)
+	if err != nil {
+		logger.WithContext(ctx).Errorf("unable to unescape saml response. err: %v", err)
+		return authenticateByExternalBrowserResult{nil, nil, err}
+	}
+	return authenticateByExternalBrowserResult{[]byte(escapedSamlResponse), []byte(proofKey), nil}
+}
+
+// dbt-only: extracted so the lease can be renewed while the browser callback is
+// outstanding. A human at an IDP prompt routinely takes longer than the lease TTL,
+// and an expired lease is stealable — at which point a second process opens its own
+// tab. Renewing at TTL/2 keeps it held for the whole sign-in.
+func waitForSamlResponse(ctx context.Context, lease *Lease, l net.Listener, application string) (string, error) {
+	encodedChan := make(chan string, 1)
+	errChan := make(chan error, 1)
+	ttl := leaseTTL()
+	ticker := time.NewTicker(ttl / 2)
+	defer ticker.Stop()
+
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			// dbt-only: upstream calls log.Fatal here, terminating the host process
+			// from inside a library.
+			logger.WithContext(ctx).Errorf("unable to accept connection. err: %v", err)
+			errChan <- err
+			return
+		}
+		defer func() {
+			if err := conn.Close(); err != nil {
+				logger.Warnf("error while closing browser connection. %v", err)
+			}
+		}()
+
 		var buf bytes.Buffer
 		total := 0
-		encodedSamlResponse := ""
+		var encoded string
 		var errAccept error
 		for {
 			b := make([]byte, bufSize)
-			n, err := c.Read(b)
+			n, err := conn.Read(b)
 			if err != nil {
 				if err != io.EOF {
 					logger.WithContext(ctx).Infof("error reading from socket. err: %v", err)
@@ -329,42 +365,42 @@ func doAuthenticateByExternalBrowser(ctx context.Context, sr *snowflakeRestful, 
 			buf.Write(b)
 			if n < bufSize {
 				// We successfully read all data
-				s := string(buf.Bytes()[:total])
-				encodedSamlResponse, errAccept = getTokenFromResponse(s)
+				encoded, errAccept = getTokenFromResponse(string(buf.Bytes()[:total]))
 				break
 			}
 			buf.Grow(bufSize)
 		}
-		if encodedSamlResponse != "" {
+
+		if encoded != "" {
 			body := fmt.Sprintf(samlSuccessHTML, application)
 			httpResponse, err := buildResponse(body)
 			if err != nil && errAccept == nil {
 				errAccept = err
 			}
-			if _, err = c.Write(httpResponse.Bytes()); err != nil && errAccept == nil {
+			if _, err = conn.Write(httpResponse.Bytes()); err != nil && errAccept == nil {
 				errAccept = err
 			}
 		}
-		if err := c.Close(); err != nil {
-			logger.Warnf("error while closing browser connection. %v", err)
+
+		if errAccept != nil {
+			errChan <- errAccept
+			return
 		}
-		encodedSamlResponseChan <- encodedSamlResponse
-		errChan <- errAccept
-	}(conn)
+		encodedChan <- encoded
+	}()
 
-	encodedSamlResponse = <-encodedSamlResponseChan
-	errFromGoroutine = <-errChan
-
-	if errFromGoroutine != nil {
-		return authenticateByExternalBrowserResult{nil, nil, errFromGoroutine}
+	for {
+		select {
+		case <-ticker.C:
+			if err := lease.Renew(ttl); err != nil {
+				logger.WithContext(ctx).Warnf("failed to renew credential cache lease during browser login. %v", err)
+			}
+		case encoded := <-encodedChan:
+			return encoded, nil
+		case err := <-errChan:
+			return "", err
+		}
 	}
-
-	escapedSamlResponse, err := url.QueryUnescape(encodedSamlResponse)
-	if err != nil {
-		logger.WithContext(ctx).Errorf("unable to unescape saml response. err: %v", err)
-		return authenticateByExternalBrowserResult{nil, nil, err}
-	}
-	return authenticateByExternalBrowserResult{[]byte(escapedSamlResponse), []byte(proofKey), nil}
 }
 
 type samlResponseProvider interface {
