@@ -18,6 +18,9 @@ __debug_bin*
 test-output.txt
 test-report.junit.xml
 
+# lease files written by lease_test.go
+*.lease
+
 # exclude vendor
 vendor
 
