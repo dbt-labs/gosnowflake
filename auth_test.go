@@ -1283,3 +1283,78 @@ func TestWithOAuthClientCredentialsFlowManual(t *testing.T) {
 	defer db.Close()
 	runSmokeQuery(t, db)
 }
+
+// ============================================================================
+// dbt-only tests: not upstream.
+//
+// Ported from dbt fork commit 8cfa350 "Fix 404 when an account has .<region>".
+// ============================================================================
+
+// parseAccount must strip the region subdomain from the account identifier before
+// it goes into the login request body.
+//
+// Why this is still needed on top of upstream's normalization: ParseDSN strips
+// everything after the first dot (internal/config/dsn.go), and
+// FillMissingConfigParameters strips the "-<external_id>" suffix for .global
+// hosts -- but only ParseDSN does the dot. The database/sql Connector path
+// (connector.go Connect) calls FillMissingConfigParameters alone, so a Config
+// constructed in code, as arrow-adbc does, never gets the dot stripped.
+func TestParseAccount(t *testing.T) {
+	testcases := []struct {
+		name     string
+		account  string
+		expected string
+	}{
+		{
+			name:     "bare account is returned unchanged",
+			account:  "myacct",
+			expected: "myacct",
+		},
+		{
+			name:     "region subdomain is removed",
+			account:  "myacct.us-east-1",
+			expected: "myacct",
+		},
+		{
+			name:     "global locator drops the external id after the last dash",
+			account:  "myacct-123abc.global",
+			expected: "myacct",
+		},
+		{
+			// The Python reference slices head[:rfind("-")] without guarding the
+			// -1 sentinel, which silently drops the last character ("myacc").
+			// Returning the head unchanged is correct.
+			name:     "global locator with no external id keeps the whole account",
+			account:  "myacct.global",
+			expected: "myacct",
+		},
+		{
+			// A dash outside a .global account is part of the account name and
+			// must survive.
+			name:     "dash is preserved when the locator is not global",
+			account:  "my-acct.us-east-1",
+			expected: "my-acct",
+		},
+		{
+			name:     "dash with no dot at all is preserved",
+			account:  "my-acct",
+			expected: "my-acct",
+		},
+		{
+			name:     "only the first segment is kept when several dots are present",
+			account:  "myacct.us-east-1.aws",
+			expected: "myacct",
+		},
+		{
+			name:     "empty account is returned unchanged",
+			account:  "",
+			expected: "",
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertEqualE(t, parseAccount(tc.account), tc.expected)
+		})
+	}
+}
