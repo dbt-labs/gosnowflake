@@ -213,6 +213,20 @@ func baseName(path string) string {
 	return base
 }
 
+// osExecutable is a variable so tests can simulate os.Executable() failing.
+var osExecutable = os.Executable
+
+// getDirectory returns the directory that relative PUT source paths are resolved against.
+// It is the directory of the running executable, which is what the driver has always used.
+// If the executable path is unavailable (for example when the driver is loaded as a shared
+// library into a host process), it falls back to the working directory.
+func getDirectory() (string, error) {
+	if ex, err := osExecutable(); err == nil {
+		return filepath.Dir(ex), nil
+	}
+	return os.Getwd()
+}
+
 // expandUser returns the argument with an initial component of ~
 func expandUser(path string) (string, error) {
 	usr, err := usr.Current()
@@ -226,13 +240,4 @@ func expandUser(path string) (string, error) {
 		path = filepath.Join(dir, path[2:])
 	}
 	return path, nil
-}
-
-// getDirectory retrieves the current working directory
-func getDirectory() (string, error) {
-	ex, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Dir(ex), nil
 }
