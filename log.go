@@ -71,6 +71,20 @@ type sfTextFormatter struct {
 func (f *sfTextFormatter) Format(entry *rlog.Entry) ([]byte, error) {
 	// mask all secrets before calling the default Format method
 	entry.Message = maskSecrets(entry.Message)
+	if len(entry.Data) > 0 {
+		// fields (WithField, WithError, context hooks) bypass Message; mask them
+		// too, keeping the original value when masking changes nothing
+		data := make(rlog.Fields, len(entry.Data))
+		for k, v := range entry.Data {
+			rendered := fmt.Sprint(v)
+			if masked := maskSecrets(rendered); masked != rendered {
+				data[k] = masked
+			} else {
+				data[k] = v
+			}
+		}
+		entry.Data = data
+	}
 	return f.TextFormatter.Format(entry)
 }
 

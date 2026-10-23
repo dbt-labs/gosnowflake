@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -334,5 +335,22 @@ func TestLogMaskSecrets(t *testing.T) {
 	var strbuf = buf.String()
 	if !strings.Contains(strbuf, expected) {
 		t.Fatalf("expected that password would be masked. WithContext was used, but got: %v", strbuf)
+	}
+}
+
+func TestLogMaskSecretsInHeadersAndFields(t *testing.T) {
+	const qrmk = "dGhpc2lzYTMyYnl0ZXNlY3JldGtleWZvcnNzZWMxMjM0NTY3OD0=" // pragma: allowlist secret
+	logger := CreateDefaultLogger()
+	buf := &bytes.Buffer{}
+	logger.SetOutput(buf)
+
+	hdr := http.Header{"X-Amz-Server-Side-Encryption-Customer-Key": {qrmk}}
+	logger.WithField("ctx", "token="+qrmk).Infof("Header: %v", hdr)
+	logger.WithError(fmt.Errorf("bad response %v token: ver:1-hint:1-abcdefgh", hdr)).Warn("x")
+
+	// verify output
+	var strbuf = buf.String()
+	if strings.Contains(strbuf, qrmk) || strings.Contains(strbuf, "abcdefgh") {
+		t.Fatalf("expected that header values and field secrets would be masked, but got: %v", strbuf)
 	}
 }
