@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -369,4 +371,25 @@ func findByPrefix(in []string, prefix string) int {
 		}
 	}
 	return -1
+}
+
+// headerNames returns the header names of h, sorted, with every value omitted.
+//
+// Header values carry session tokens, storage credentials and the SSE-C
+// customer key, so they must not reach a log. Relying on the log masking to
+// redact them is not sufficient: the masking is pattern-based and therefore
+// sensitive to how the value was rendered.
+//
+// Result is sorted so log output is deterministic; Go randomizes map
+// iteration order.
+func headerNames(h http.Header) []string {
+	if len(h) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(h))
+	for name := range h {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
 }

@@ -1,8 +1,11 @@
 package gosnowflake
 
 import (
-	"strings"
+	"fmt"
 	"testing"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -11,76 +14,84 @@ const (
 		"cDu69ZL_1X6e9h5z62t/iY7ZkII28n2qU=nrBJUgPRCIbtJQkVJXIuOHjX4G5yUEKjZ" + // pragma: allowlist secret
 		"BAx4w6=_lqtt67bIA=o7D=oUSjfywsRFoloNIkBPXCwFTv+1RVUHgVA2g8A9Lw5XdJY" + // pragma: allowlist secret
 		"uI8vhg=f0bKSq7AhQ2Bh"
-	randomPassword = `Fh[+2J~AcqeqW%?`
-)
-
-func TestMaskToken(t *testing.T) {
-	if text := maskSecrets("Token =" + longToken); strings.Compare(text, "Token =****") != 0 {
-		t.Errorf("mask unsuccessful. expected: Token=****, got: %v", text)
-	}
-	if text := maskSecrets("idToken : " + longToken); strings.Compare(text, "idToken : ****") != 0 {
-		t.Errorf("mask unsuccessful. expected: idToken : ****, got: %v", text)
-	}
-	if text := maskSecrets("sessionToken : " + longToken); strings.Compare(text, "sessionToken : ****") != 0 {
-		t.Errorf("mask unsuccessful. expected: sessionToken : ****, got: %v", text)
-	}
-	if text := maskSecrets("masterToken : " + longToken); strings.Compare(text, "masterToken : ****") != 0 {
-		t.Errorf("mask unsuccessful. expected: masterToken : ****, got: %v", text)
-	}
-	if text := maskSecrets("accessToken : " + longToken); strings.Compare(text, "accessToken : ****") != 0 {
-		t.Errorf("mask unsuccessful. expected: accessToken : ****, got: %v", text)
-	}
-	if text := maskSecrets("refreshToken : " + longToken); strings.Compare(text, "refreshToken : ****") != 0 {
-		t.Errorf("mask unsuccessful. expected: refreshToken : ****, got: %v", text)
-	}
-	if text := maskSecrets("programmaticAccessToken : " + longToken); strings.Compare(text, "programmaticAccessToken : ****") != 0 {
-		t.Errorf("mask unsuccessful. expected: programmaticAccessToken : ****, got: %v", text)
-	}
-	if text := maskSecrets("programmatic_access_token : " + longToken); strings.Compare(text, "programmatic_access_token : ****") != 0 {
-		t.Errorf("mask unsuccessful. expected: programmatic_access_token : ****, got: %v", text)
-	}
-
-	falsePositiveToken := "2020-04-30 23:06:04,069 - MainThread auth.py:397" +
+	randomPassword     = `Fh[+2J~AcqeqW%?`
+	falsePositiveToken = "2020-04-30 23:06:04,069 - MainThread auth.py:397" +
 		" - write_temporary_credential() - DEBUG - no ID token is given when " +
 		"try to store temporary credential"
-	if text := maskSecrets(falsePositiveToken); strings.Compare(text, falsePositiveToken) != 0 {
-		t.Errorf("mask token %v should not have changed value. got: %v", falsePositiveToken, text)
+)
+
+// generateTestJWT creates a test JWT token for masking tests using the JWT library
+func generateTestJWT(t *testing.T) string {
+	// Create claims for the test JWT
+	claims := jwt.MapClaims{
+		"sub":  "test123",
+		"name": "Test User",
+		"exp":  time.Now().Add(time.Hour).Unix(),
+		"iat":  time.Now().Unix(),
 	}
+
+	// Create the token with HS256 signing method
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// Sign the token with a test secret
+	testSecret := []byte("test-secret-for-masking-validation")
+	tokenString, err := token.SignedString(testSecret)
+	if err != nil {
+		// Fallback to a simple test JWT if signing fails
+		t.Fatalf("Failed to generate test JWT: %s", err)
+	}
+
+	return tokenString
 }
 
-func TestMaskPassword(t *testing.T) {
-	if text := maskSecrets("password:" + randomPassword); strings.Compare(text, "password:****") != 0 {
-		t.Errorf("mask unsuccessful. expected: password:****, got: %v", text)
-	}
-	if text := maskSecrets("PASSWORD:" + randomPassword); strings.Compare(text, "PASSWORD:****") != 0 {
-		t.Errorf("mask unsuccessful. expected: PASSWORD:****, got: %v", text)
-	}
-	if text := maskSecrets("PaSsWoRd:" + randomPassword); strings.Compare(text, "PaSsWoRd:****") != 0 {
-		t.Errorf("mask unsuccessful. expected: PaSsWoRd:****, got: %v", text)
-	}
-	if text := maskSecrets("password = " + randomPassword); strings.Compare(text, "password = ****") != 0 {
-		t.Errorf("mask unsuccessful. expected: password = ****, got: %v", text)
-	}
-	if text := maskSecrets("pwd:" + randomPassword); strings.Compare(text, "pwd:****") != 0 {
-		t.Errorf("mask unsuccessful. expected: pwd:****, got: %v", text)
-	}
-}
+func TestSecretsDetector(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		// Token masking tests
+		{"Token with equals", "Token =" + longToken, "Token =****"},
+		{"idToken with colon space", "idToken : " + longToken, "idToken : ****"},
+		{"sessionToken with colon space", "sessionToken : " + longToken, "sessionToken : ****"},
+		{"masterToken with colon space", "masterToken : " + longToken, "masterToken : ****"},
+		{"accessToken with colon space", "accessToken : " + longToken, "accessToken : ****"},
+		{"refreshToken with colon space", "refreshToken : " + longToken, "refreshToken : ****"},
+		{"programmaticAccessToken with colon space", "programmaticAccessToken : " + longToken, "programmaticAccessToken : ****"},
+		{"programmatic_access_token with colon space", "programmatic_access_token : " + longToken, "programmatic_access_token : ****"},
+		{"JWT - with Bearer prefix", "Bearer " + generateTestJWT(t), "Bearer ****"},
+		{"JWT - with JWT prefix", "JWT " + generateTestJWT(t), "JWT ****"},
 
-func TestTokenPassword(t *testing.T) {
-	text := maskSecrets("token=" + longToken + " foo bar baz " + "password:" + randomPassword)
-	expected := "token=**** foo bar baz password:****"
-	if strings.Compare(text, expected) != 0 {
-		t.Errorf("mask unsuccessful. expected: %v, got: %v", expected, text)
-	}
-	text = maskSecrets("PWD = " + randomPassword + " blah blah blah " + "TOKEN:" + longToken)
-	expected = "PWD = **** blah blah blah TOKEN:****"
-	if strings.Compare(text, expected) != 0 {
-		t.Errorf("mask unsuccessful. expected: %v, got: %v", expected, text)
-	}
-}
+		// Password masking tests
+		{"password with colon", "password:" + randomPassword, "password:****"},
+		{"PASSWORD uppercase with colon", "PASSWORD:" + randomPassword, "PASSWORD:****"},
+		{"PaSsWoRd mixed case with colon", "PaSsWoRd:" + randomPassword, "PaSsWoRd:****"},
+		{"password with equals and spaces", "password = " + randomPassword, "password = ****"},
+		{"pwd with colon", "pwd:" + randomPassword, "pwd:****"},
 
-func TestClientSecret(t *testing.T) {
-	text := maskSecrets("clientSecret abc oauthClientSECRET=def")
-	expected := "clientSecret **** oauthClientSECRET=****"
-	assertEqualE(t, text, expected)
+		// Mixed token and password tests
+		{
+			"token and password mixed",
+			fmt.Sprintf("token=%s foo bar baz password:%s", longToken, randomPassword),
+			"token=**** foo bar baz password:****",
+		},
+		{
+			"PWD and TOKEN mixed",
+			fmt.Sprintf("PWD = %s blah blah blah TOKEN:%s", randomPassword, longToken),
+			"PWD = **** blah blah blah TOKEN:****",
+		},
+
+		// Client secret tests
+		{"clientSecret with values", "clientSecret abc oauthClientSECRET=def", "clientSecret **** oauthClientSECRET=****"},
+
+		// False positive test
+		{"false positive should not be masked", falsePositiveToken, falsePositiveToken},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := maskSecrets(tc.input)
+			assertEqualE(t, result, tc.expected)
+		})
+	}
 }
