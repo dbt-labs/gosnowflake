@@ -181,6 +181,12 @@ type Config struct {
 // Validate enables testing if config is correct.
 // A driver client may call it manually, but it is also called during opening first connection.
 func (c *Config) Validate() error {
+	if err := validateAccountAndRegion(c); err != nil {
+		return err
+	}
+	if c.Authenticator == AuthTypeWorkloadIdentityFederation && !isSnowflakeHostForWorkloadIdentity(c.Host) {
+		return ErrWifNonSnowflakeHost(c.Host)
+	}
 	if c.TmpDirPath != "" {
 		if _, err := os.Stat(c.TmpDirPath); err != nil {
 			return err
@@ -587,6 +593,9 @@ func ParseDSN(dsn string) (cfg *Config, err error) {
 }
 
 func fillMissingConfigParameters(cfg *Config) error {
+	if err := validateAccountAndRegion(cfg); err != nil {
+		return err
+	}
 	posDash := strings.LastIndex(cfg.Account, "-")
 	if posDash > 0 {
 		if strings.Contains(strings.ToLower(cfg.Host), ".global.") {
@@ -641,6 +650,9 @@ func fillMissingConfigParameters(cfg *Config) error {
 				cfg.Host = cfg.Account + defaultDomain
 			}
 		}
+	}
+	if cfg.Authenticator == AuthTypeWorkloadIdentityFederation && !isSnowflakeHostForWorkloadIdentity(cfg.Host) {
+		return ErrWifNonSnowflakeHost(cfg.Host)
 	}
 	if cfg.LoginTimeout == 0 {
 		cfg.LoginTimeout = defaultLoginTimeout
@@ -736,6 +748,138 @@ func extractRegionFromAccount(account string) (region string, posDot int) {
 
 func hostIncludesTopLevelDomain(host string) bool {
 	return strings.Contains(strings.ToLower(host), topLevelDomainPrefix)
+}
+
+// wifAllowedHostSuffixesEnvVar is the ONLY escape hatch for the
+// isSnowflakeHostForWorkloadIdentity allowlist. Read only from the process
+// environment - never from the DSN, connection parameters or configuration
+// files - so connection configuration cannot influence the allowlist.
+// Entries are additive: they extend the recognized-host list and cannot
+// disable it.
+const wifAllowedHostSuffixesEnvVar = "SNOWFLAKE_WIF_ALLOWED_HOST_SUFFIXES"
+
+// wifAllowedHostSuffixes are the Snowflake-owned domain suffixes that the
+// WORKLOAD_IDENTITY authenticator is permitted to send ambient cloud
+// credentials to. Apex (no subdomain) is accepted for parity with the other
+// drivers' equivalent check.
+var wifAllowedHostSuffixes = []string{
+	"snowflakecomputing.com",
+	"snowflakecomputing.cn",
+	"snowflakecomputing.mil",
+}
+
+// NormalizeHost normalizes a host string for allow-list matching and URL
+// construction. It trims whitespace, lowercases ASCII A–Z only (to avoid
+// Unicode case-folding surprises such as the Kelvin sign U+212A folding to
+// 'k'), strips everything from the first ':' onward (port), then strips
+// exactly one trailing '.'. Non-ASCII characters are left unchanged so that
+// IsLdhHost can reject them.
+//
+// The port must be stripped before the trailing dot: a host in FQDN form
+// with an explicit port (e.g. "acct.snowflakecomputing.com.:443") carries
+// the dot immediately before the colon, so removing the colon-and-tail
+// first leaves the trailing dot to be stripped in the next step.
+func NormalizeHost(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + 32
+		}
+		return r
+	}, s)
+	if idx := strings.IndexByte(s, ':'); idx >= 0 {
+		s = s[:idx]
+	}
+	s = strings.TrimSuffix(s, ".")
+	return s
+}
+
+// IsLdhHost returns true if the already-normalized host contains only
+// LDH characters ([a-z0-9_-] per label, separated by '.'). Each label must
+// be non-empty.
+//
+// This is an allow-list, not a block-list. Enumerating forbidden characters
+// does not work: URL parsers variously terminate the authority at a space,
+// semicolon, quote, percent-escape, or a full-width look-alike of '.', '#',
+// or '?'. A host whose trailing labels are a recognized Snowflake domain can
+// still begin with an unrelated name, so a parser stopping early resolves
+// that unrelated name instead.
+func IsLdhHost(normalized string) bool {
+	if normalized == "" {
+		return false
+	}
+	labelLen := 0
+	for _, c := range normalized {
+		switch {
+		case c == '.':
+			if labelLen == 0 {
+				return false
+			}
+			labelLen = 0
+		case (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_':
+			labelLen++
+		default:
+			return false
+		}
+	}
+	return labelLen > 0
+}
+
+// IsSnowflakeHost returns true if the already-normalized host ends at a
+// recognized Snowflake domain suffix, anchored at a label boundary. Unlike
+// isSnowflakeHostForWorkloadIdentity it does not consult the
+// SNOWFLAKE_WIF_ALLOWED_HOST_SUFFIXES escape hatch.
+func IsSnowflakeHost(normalized string) bool {
+	for _, s := range wifAllowedHostSuffixes {
+		if normalized == s || strings.HasSuffix(normalized, "."+s) {
+			return true
+		}
+	}
+	return false
+}
+
+// extraWifAllowedHostSuffixesFromEnv parses the additive escape-hatch
+// suffixes from SNOWFLAKE_WIF_ALLOWED_HOST_SUFFIXES (comma-separated), normalizing
+// each entry and dropping empty ones. It never disables the check - it can
+// only widen the allowlist.
+func extraWifAllowedHostSuffixesFromEnv() []string {
+	raw := os.Getenv(wifAllowedHostSuffixesEnvVar)
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var extra []string
+	for _, part := range strings.Split(raw, ",") {
+		s := NormalizeHost(part)
+		if s != "" {
+			extra = append(extra, s)
+		}
+	}
+	if len(extra) > 0 {
+		logger.Infof("WORKLOAD_IDENTITY host allowlist extended via %v with additional suffixes: %v", wifAllowedHostSuffixesEnvVar, extra)
+	}
+	return extra
+}
+
+// isSnowflakeHostForWorkloadIdentity is a suffix-anchored allowlist that
+// restricts Workload Identity attestation to recognized Snowflake hosts
+// before any cloud credential is fetched. Unlike hostIncludesTopLevelDomain
+// (a substring test used elsewhere for account/port inference), matching
+// here is anchored to a label boundary at the end of the host, so only the
+// listed suffixes and their subdomains are recognized.
+func isSnowflakeHostForWorkloadIdentity(host string) bool {
+	h := NormalizeHost(host)
+	if h == "" {
+		return false
+	}
+	if IsSnowflakeHost(h) {
+		return true
+	}
+	for _, s := range extraWifAllowedHostSuffixesFromEnv() {
+		if h == s || strings.HasSuffix(h, "."+s) {
+			return true
+		}
+	}
+	return false
 }
 
 func buildHostFromAccountAndRegion(account, region string) string {
