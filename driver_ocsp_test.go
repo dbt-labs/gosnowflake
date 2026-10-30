@@ -697,15 +697,23 @@ func TestOCSPUnexpectedResponses(t *testing.T) {
 	ocspCacheServerEnabled = false
 
 	cfg := wiremockHTTPS.connectionConfig(t)
+	// A failed handshake must not be retried by login, or the OCSP
+	// GET/POST counts below would scale with MaxRetryCount.
+	cfg.MaxRetryCount = 1
 
 	countingRoundTripper := newCountingRoundTripper(http.DefaultTransport)
 	ocspTransport := wiremockHTTPS.ocspTransporter(t, countingRoundTripper)
 	cfg.Transporter = ocspTransport
 
-	runSampleQuery := func(cfg *Config) {
+	querySelect1 := func(cfg *Config) (*sql.Rows, error) {
 		connector := NewConnector(SnowflakeDriver{}, *cfg)
 		db := sql.OpenDB(connector)
-		rows, err := db.Query("SELECT 1")
+		return db.Query("SELECT 1")
+	}
+
+	runSampleQuery := func(t *testing.T, cfg *Config) {
+		t.Helper()
+		rows, err := querySelect1(cfg)
 		assertNilF(t, err)
 		defer rows.Close()
 		var v int
@@ -722,7 +730,7 @@ func TestOCSPUnexpectedResponses(t *testing.T) {
 		wiremock.registerMappings(t, wiremockMapping{filePath: "select1.json"},
 			wiremockMapping{filePath: "auth/password/successful_flow.json"},
 		)
-		runSampleQuery(cfg)
+		runSampleQuery(t, cfg)
 		assertTrueE(t, countingRoundTripper.postReqCount["http://localhost:56734"] > 1)
 		assertEqualE(t, countingRoundTripper.getReqCount["http://localhost:56734"], 0)
 	})
@@ -735,9 +743,13 @@ func TestOCSPUnexpectedResponses(t *testing.T) {
 			wiremockMapping{filePath: "select1.json"},
 			wiremockMapping{filePath: "auth/password/successful_flow.json"},
 		)
-		runSampleQuery(cfg)
-		assertEqualE(t, countingRoundTripper.postReqCount[wiremock.baseURL()], 3)
-		assertEqualE(t, countingRoundTripper.getReqCount[wiremock.baseURL()], 3)
+		// GET fallback still runs; the same unparseable body is a received
+		// response that did not validate, so fail-open must not proceed.
+		_, err := querySelect1(cfg)
+		assertNotNilF(t, err)
+		assertStringContainsE(t, err.Error(), "asn1: structure error")
+		assertEqualE(t, countingRoundTripper.postReqCount[wiremock.baseURL()], 2)
+		assertEqualE(t, countingRoundTripper.getReqCount[wiremock.baseURL()], 2)
 	})
 
 	t.Run("should not fallback to GET when for POST unauthorized is returned", func(t *testing.T) {
@@ -749,8 +761,10 @@ func TestOCSPUnexpectedResponses(t *testing.T) {
 			wiremockMapping{filePath: "select1.json"},
 			wiremockMapping{filePath: "auth/password/successful_flow.json"},
 		)
-		runSampleQuery(cfg)
-		assertEqualE(t, countingRoundTripper.postReqCount[wiremock.baseURL()], 3)
+		_, err := querySelect1(cfg)
+		assertNotNilF(t, err)
+		assertStringContainsE(t, err.Error(), "unauthorized")
+		assertEqualE(t, countingRoundTripper.postReqCount[wiremock.baseURL()], 2)
 		assertEqualE(t, countingRoundTripper.getReqCount[wiremock.baseURL()], 0)
 	})
 }

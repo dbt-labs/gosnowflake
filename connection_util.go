@@ -353,13 +353,69 @@ func populateChunkDownloader(
 	}
 }
 
-/**
- * We can only tell if private link is enabled for certain hosts when the hostname contains the subdomain
- * 'privatelink.snowflakecomputing.' but we don't have a good way of telling if a private link connection is
- * expected for internal stages for example.
- */
+// checkIsPrivateLink reports whether host is a recognized PrivateLink endpoint.
 func checkIsPrivateLink(host string) bool {
-	return strings.Contains(strings.ToLower(host), ".privatelink.snowflakecomputing.")
+	normalized := normalizeSnowflakeHost(host)
+	return isLdhHost(normalized) && isSnowflakeHost(normalized) && strings.Contains(normalized, ".privatelink.")
+}
+
+// normalizeSnowflakeHost trims whitespace, folds ASCII case, removes the port, and
+// strips one trailing dot before applying the hostname allowlist.
+func normalizeSnowflakeHost(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + 32
+		}
+		return r
+	}, s)
+	if idx := strings.IndexByte(s, ':'); idx >= 0 {
+		s = s[:idx]
+	}
+	s = strings.TrimSuffix(s, ".")
+	return s
+}
+
+// isLdhHost returns true if the already-normalized host contains only
+// LDH characters ([a-z0-9_-] per label, separated by '.'). Each label must
+// be non-empty.
+//
+// This is an allow-list, not a block-list. Enumerating forbidden characters
+// does not work: URL parsers variously terminate the authority at a space,
+// semicolon, quote, percent-escape, or a full-width look-alike of '.', '#',
+// or '?'. A host whose trailing labels are a recognized Snowflake domain can
+// still begin with an unrelated name, so a parser stopping early resolves
+// that unrelated name instead.
+func isLdhHost(normalized string) bool {
+	if normalized == "" {
+		return false
+	}
+	labelLen := 0
+	for _, c := range normalized {
+		switch {
+		case c == '.':
+			if labelLen == 0 {
+				return false
+			}
+			labelLen = 0
+		case (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_':
+			labelLen++
+		default:
+			return false
+		}
+	}
+	return labelLen > 0
+}
+
+// isSnowflakeHost returns true if the already-normalized host ends at a
+// recognized Snowflake domain suffix, anchored at a label boundary.
+func isSnowflakeHost(normalized string) bool {
+	for _, s := range []string{"snowflakecomputing.com", "snowflakecomputing.cn", "snowflakecomputing.mil"} {
+		if normalized == s || strings.HasSuffix(normalized, "."+s) {
+			return true
+		}
+	}
+	return false
 }
 
 func isStatementContext(ctx context.Context) bool {

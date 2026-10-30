@@ -4,6 +4,8 @@
 
 Bug fixes:
 
+- Hardened OCSP response verification, cache validation, fail-open handling, and URL construction (CVE-2026-85525; snowflakedb/gosnowflake#1844).
+
 - Fixed a panic when a corrupt OCSP cache key is encountered in the remote cache server or local cache file (snowflakedb/gosnowflake#1819).
 
 Bug fixes:
