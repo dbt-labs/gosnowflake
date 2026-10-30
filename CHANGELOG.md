@@ -2,6 +2,10 @@
 
 ## Upcoming Release
 
+Security fixes:
+
+- Restricted workload identity authentication to recognized Snowflake hosts and hardened Azure identity requests (CVE-2026-86600; snowflakedb/gosnowflake#1844).
+
 Bug fixes:
 
 - Handle HTTP307 & 308 in drivers to achieve better resiliency to backend errors (snowflakedb/gosnowflake#1616).
