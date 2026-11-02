@@ -7,9 +7,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +21,26 @@ import (
 
 	"golang.org/x/crypto/ocsp"
 )
+
+// resetOCSPCaches resets the in-memory OCSP caches to empty maps without
+// touching the on-disk cache or checking ocspCacheServerEnabled.
+func resetOCSPCaches() {
+	ocspResponseCacheLock.Lock()
+	ocspResponseCache = make(map[certIDKey]*certCacheValue)
+	ocspResponseCacheLock.Unlock()
+	ocspParsedRespCacheLock.Lock()
+	ocspParsedRespCache = make(map[parsedOcspRespKey]*ocspStatus)
+	ocspParsedRespCacheLock.Unlock()
+}
+
+// resetOCSPCachesForTest resets the in-memory OCSP caches and registers
+// t.Cleanup to reset them again at test end, making the test hermetic with
+// respect to global OCSP cache state.
+func resetOCSPCachesForTest(t *testing.T) {
+	t.Helper()
+	resetOCSPCaches()
+	t.Cleanup(resetOCSPCaches)
+}
 
 func TestOCSP(t *testing.T) {
 	cacheServerEnabled := []string{
@@ -174,6 +196,7 @@ func TestUnitEncodeCertIDGood(t *testing.T) {
 }
 
 func TestUnitCheckOCSPResponseCache(t *testing.T) {
+	resetOCSPCachesForTest(t)
 	ocspCacheServerEnabled = true
 	ov := newOcspValidator(&Config{OCSPFailOpen: OCSPFailOpenTrue})
 	dummyKey0 := certIDKey{
@@ -241,12 +264,99 @@ func TestUnitCheckOCSPResponseCache(t *testing.T) {
 	}
 }
 
+// TestExtractOCSPCacheResponseValueVerifiesSignatureAndSerial is a regression
+// test for SNOW-3649697. A cached OCSP response must only be trusted as a
+// Good/Revoked verdict after (a) its signature is verified against the issuer
+// and (b) it is confirmed to correspond to the certificate being validated.
+// It also asserts that the cache-load path (nil subject/issuer) never populates
+// the parsed-response memo, so an unverified response is not memoized as Good
+// and served to the issuer-aware handshake lookup.
+func TestExtractOCSPCacheResponseValueVerifiesSignatureAndSerial(t *testing.T) {
+	ocspCacheServerEnabled = true
+
+	// Issuing CA and the leaf certificate it signs.
+	caKey, caCert := createCa(t, nil, nil, "Test Root CA", 0)
+	_, leafCert := createLeafCert(t, caCert, caKey, 0)
+	// A second, unrelated CA (different key) used to produce responses that
+	// must be rejected.
+	otherCAKey, otherCACert := createCa(t, nil, nil, "Other CA", 0)
+
+	now := time.Now()
+	cacheValueFor := func(respDER []byte) *certCacheValue {
+		return &certCacheValue{
+			ts:             float64(now.UTC().Unix()),
+			ocspRespBase64: base64.StdEncoding.EncodeToString(respDER),
+		}
+	}
+	goodTemplate := func(serial *big.Int) ocsp.Response {
+		return ocsp.Response{
+			Status:       ocsp.Good,
+			SerialNumber: serial,
+			ThisUpdate:   now.Add(-time.Hour),
+			NextUpdate:   now.Add(time.Hour),
+		}
+	}
+	certID := &certIDKey{
+		HashAlgorithm: crypto.SHA1,
+		NameHash:      "victim",
+		IssuerKeyHash: "victim",
+		SerialNumber:  leafCert.SerialNumber.String(),
+	}
+	parsedRespCacheLen := func() int {
+		ocspParsedRespCacheLock.Lock()
+		defer ocspParsedRespCacheLock.Unlock()
+		return len(ocspParsedRespCache)
+	}
+
+	t.Run("Good signed by an unrelated CA is rejected and not memoized", func(t *testing.T) {
+		resetOCSPCachesForTest(t)
+		mismatched, err := ocsp.CreateResponse(otherCACert, otherCACert, goodTemplate(leafCert.SerialNumber), otherCAKey)
+		assertNilF(t, err)
+		value := cacheValueFor(mismatched)
+
+		// Cache-load path (nil subject/issuer): an unverified verdict must not
+		// be written to the memo; only the verified handshake path may do so.
+		extractOCSPCacheResponseValueWithoutSubject(certID, value)
+		assertEqualE(t, parsedRespCacheLen(), 0)
+
+		// Handshake path verifies against the issuing CA; the unrelated signature fails.
+		status := extractOCSPCacheResponseValue(certID, value, leafCert, caCert)
+		assertEqualE(t, status.code, ocspFailedParseResponse)
+		assertEqualE(t, parsedRespCacheLen(), 0)
+	})
+
+	t.Run("legit Good for a different serial is rejected", func(t *testing.T) {
+		resetOCSPCachesForTest(t)
+		_, otherLeaf := createLeafCert(t, caCert, caKey, 0)
+		// Validly signed by the real CA, but about a different certificate.
+		respForOther, err := ocsp.CreateResponse(caCert, caCert, goodTemplate(otherLeaf.SerialNumber), caKey)
+		assertNilF(t, err)
+		value := cacheValueFor(respForOther)
+
+		status := extractOCSPCacheResponseValue(certID, value, leafCert, caCert)
+		assertEqualE(t, status.code, ocspFailedParseResponse)
+	})
+
+	t.Run("genuine Good for the right cert and CA is accepted and memoized", func(t *testing.T) {
+		resetOCSPCachesForTest(t)
+		good, err := ocsp.CreateResponse(caCert, caCert, goodTemplate(leafCert.SerialNumber), caKey)
+		assertNilF(t, err)
+		value := cacheValueFor(good)
+
+		status := extractOCSPCacheResponseValue(certID, value, leafCert, caCert)
+		assertEqualE(t, status.code, ocspStatusGood)
+		// A verified verdict is memoized for reuse on subsequent lookups.
+		assertEqualE(t, parsedRespCacheLen(), 1)
+	})
+}
+
 func TestOcspCacheClearer(t *testing.T) {
+	resetOCSPCachesForTest(t)
 	origValue := os.Getenv(ocspResponseCacheClearingIntervalInSecondsEnv)
 	defer func() {
 		StopOCSPCacheClearer()
 		os.Setenv(ocspResponseCacheClearingIntervalInSecondsEnv, origValue)
-		initOCSPCache()
+		resetOCSPCaches()
 		StartOCSPCacheClearer()
 	}()
 	syncUpdateOcspResponseCache(func() {
@@ -355,7 +465,7 @@ func TestOCSPRetry(t *testing.T) {
 		context.Background(),
 		client, emptyRequest,
 		dummyOCSPHost,
-		make(map[string]string), []byte{0}, certs[len(certs)-1], 10*time.Second)
+		make(map[string]string), []byte{0}, certs[0], certs[len(certs)-1], 10*time.Second)
 	if st.err == nil {
 		fmt.Printf("should fail: %v, %v, %v\n", res, b, st)
 	}
@@ -368,7 +478,7 @@ func TestOCSPRetry(t *testing.T) {
 		context.Background(),
 		client, fakeRequestFunc,
 		dummyOCSPHost,
-		make(map[string]string), []byte{0}, certs[len(certs)-1], 5*time.Second)
+		make(map[string]string), []byte{0}, certs[0], certs[len(certs)-1], 5*time.Second)
 	if st.err == nil {
 		fmt.Printf("should fail: %v, %v, %v\n", res, b, st)
 	}
@@ -439,6 +549,47 @@ func TestOCSPCacheServerRetry(t *testing.T) {
 	}
 }
 
+// TestExtractTsAndOcspRespBase64Malformed is a regression test for
+// SNOW-3649896: a short or malformed cache entry (decoded from an external
+// cache payload) must not panic with index-out-of-range; it is rejected
+// instead.
+func TestExtractTsAndOcspRespBase64Malformed(t *testing.T) {
+	cases := []struct {
+		name  string
+		value []any
+		ok    bool
+	}{
+		{"empty", []any{}, false},
+		{"single element", []any{123.0}, false},
+		{"ts wrong type", []any{"notFloat", "resp"}, false},
+		{"resp wrong type", []any{123.0, 456.0}, false},
+		{"well formed", []any{123.0, "respBase64"}, true},
+		{"extra elements tolerated", []any{123.0, "respBase64", "ignored"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, _, _ := extractTsAndOcspRespBase64(tc.value) // must not panic
+			assertEqualE(t, ok, tc.ok)
+		})
+	}
+}
+
+// TestCheckOCSPCacheServerMalformedPayloadNoPanic is a regression test for
+// SNOW-3649896: a malformed OCSP cache body (short arrays) must be skipped
+// without panicking inside the TLS verify callback.
+func TestCheckOCSPCacheServerMalformedPayloadNoPanic(t *testing.T) {
+	dummyOCSPHost := &url.URL{Scheme: "https", Host: "dummyOCSPHost"}
+	// `[]` and `[123.0]` previously triggered index-out-of-range; the last
+	// entry is well-formed and must survive.
+	body := []byte(`{"emptyArr":[],"oneElem":[123.0],"goodEntry":[123.0,"abc"]}`)
+	client := &fakeHTTPClient{cnt: 0, success: true, body: body, t: t}
+	ret, st := checkOCSPCacheServer(
+		context.Background(), client, fakeRequestFunc, dummyOCSPHost, 20*time.Second)
+	assertEqualE(t, st.code, ocspSuccess)
+	assertNotNilF(t, ret)
+	assertEqualE(t, len(*ret), 1) // only the well-formed entry is kept
+}
+
 type tcCanEarlyExit struct {
 	results       []*ocspStatus
 	resultLen     int
@@ -495,7 +646,7 @@ func TestCanEarlyExitForOCSP(t *testing.T) {
 			retFailOpen:   nil,
 			retFailClosed: &ocspStatus{ocspStatusUnknown, errors.New("unknown")},
 		},
-		{ // 3: not taken as revoked if any invalid OCSP response (ocspInvalidValidity) is included.
+		{ // 3: a confirmed Revoked leaf must fail-closed even when a sibling response is invalid (ocspInvalidValidity).
 			results: []*ocspStatus{
 				{
 					code: ocspStatusRevoked,
@@ -508,10 +659,10 @@ func TestCanEarlyExitForOCSP(t *testing.T) {
 					code: ocspStatusGood,
 				},
 			},
-			retFailOpen:   nil,
+			retFailOpen:   &ocspStatus{ocspStatusRevoked, errors.New("revoked")},
 			retFailClosed: &ocspStatus{ocspStatusRevoked, errors.New("revoked")},
 		},
-		{ // 4: not taken as revoked if the number of results don't match the expected results.
+		{ // 4: a confirmed Revoked leaf must fail-closed even when the number of results doesn't match the chain length.
 			results: []*ocspStatus{
 				{
 					code: ocspStatusRevoked,
@@ -522,7 +673,7 @@ func TestCanEarlyExitForOCSP(t *testing.T) {
 				},
 			},
 			resultLen:     3,
-			retFailOpen:   nil,
+			retFailOpen:   &ocspStatus{ocspStatusRevoked, errors.New("revoked")},
 			retFailClosed: &ocspStatus{ocspStatusRevoked, errors.New("revoked")},
 		},
 	}
@@ -547,6 +698,61 @@ func TestCanEarlyExitForOCSP(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCanEarlyExitForOCSPRevokedWithSiblingError is a regression test for
+// SNOW-3649733: in fail-open mode, a confirmed Revoked verdict for one chain
+// element must still close the connection even when a different element could
+// not be reached. Fail-open only covers inconclusive results, never a
+// positively confirmed revocation.
+func TestCanEarlyExitForOCSPRevokedWithSiblingError(t *testing.T) {
+	siblingErrors := []ocspStatusCode{
+		ocspFailedSubmit,
+		ocspFailedResponse,
+		ocspNoServer,
+		ocspMissedCache,
+	}
+	for _, siblingCode := range siblingErrors {
+		t.Run(fmt.Sprintf("revoked_leaf_sibling_%d", siblingCode), func(t *testing.T) {
+			results := []*ocspStatus{
+				{code: ocspStatusRevoked, err: errors.New("revoked")},
+				{code: siblingCode, err: errors.New("responder unreachable")},
+			}
+			// chain = leaf + intermediate + root (root is not checked).
+			mockVerifiedChain := make([]*x509.Certificate, 3)
+
+			ovOpen := newOcspValidator(&Config{OCSPFailOpen: OCSPFailOpenTrue})
+			r := ovOpen.canEarlyExitForOCSP(results, mockVerifiedChain)
+			assertNotNilF(t, r, "fail-open must surface the Revoked verdict")
+			assertEqualF(t, r.code, ocspStatusRevoked, "fail-open must surface the Revoked verdict")
+
+			ovClosed := newOcspValidator(&Config{OCSPFailOpen: OCSPFailOpenFalse})
+			r = ovClosed.canEarlyExitForOCSP(results, mockVerifiedChain)
+			assertNotNilF(t, r, "fail-closed must reject the connection")
+		})
+	}
+}
+
+// TestCanEarlyExitForOCSPInvalidResponseFailsClosed covers SNOW-3649697: a
+// response that was received but did not verify against the certificate being
+// checked (ocspFailedParseResponse) is a definitive result and must close the
+// connection in both fail-open and fail-closed modes, unlike an unreachable
+// responder which fail-open tolerates.
+func TestCanEarlyExitForOCSPInvalidResponseFailsClosed(t *testing.T) {
+	results := []*ocspStatus{
+		{code: ocspFailedParseResponse, err: errors.New("response did not validate")},
+		{code: ocspStatusGood},
+	}
+	mockVerifiedChain := make([]*x509.Certificate, 3)
+
+	ovOpen := newOcspValidator(&Config{OCSPFailOpen: OCSPFailOpenTrue})
+	r := ovOpen.canEarlyExitForOCSP(results, mockVerifiedChain)
+	assertNotNilF(t, r, "fail-open must not tolerate a response that did not validate")
+	assertEqualF(t, r.code, ocspFailedParseResponse, "fail-open must not tolerate a response that did not validate")
+
+	ovClosed := newOcspValidator(&Config{OCSPFailOpen: OCSPFailOpenFalse})
+	r = ovClosed.canEarlyExitForOCSP(results, mockVerifiedChain)
+	assertNotNilF(t, r, "fail-closed must reject the connection")
 }
 
 func TestInitOCSPCacheFileCreation(t *testing.T) {
@@ -619,4 +825,67 @@ func syncUpdateOcspResponseCache(f func()) {
 	ocspResponseCacheLock.Lock()
 	defer ocspResponseCacheLock.Unlock()
 	f()
+}
+
+// issue#1818 - corrupt/mangled OCSP entries must be skipped both in the on-filesystem, pre-existing
+// OCSP cache file, and in the one which is freshly downloaded from OCSP_CACHE_SERVER, and
+// must not cause a panic on nil pointer dereference.
+// After skipping the corrupt entry, the driver continues to validate online with OCSP Responder.
+
+// Corrupt entry in file downloaded from OCSP_CACHE_SERVER
+func TestUnitDownloadOCSPCacheServerCorruptKey(t *testing.T) {
+	ocspCacheServerEnabled = true
+
+	wiremock.registerMappings(t, newWiremockMapping("ocsp/corrupt_cache_key.json"))
+
+	ov := newOcspValidator(&Config{OCSPFailOpen: OCSPFailOpenTrue})
+	ov.cacheServerURL = fmt.Sprintf("%v/ocsp_response_cache.json", wiremock.baseURL())
+
+	syncUpdateOcspResponseCache(func() {
+		ocspResponseCache = make(map[certIDKey]*certCacheValue)
+	})
+
+	// Must not panic.
+	ov.downloadOCSPCacheServer()
+
+	func() {
+		ocspResponseCacheLock.RLock()
+		defer ocspResponseCacheLock.RUnlock()
+		assertEqualF(t, len(ocspResponseCache), 0, "corrupt key must not be stored in cache")
+	}()
+}
+
+// Corrupt entry in the on-disk OCSP cache file
+func TestUnitInitOCSPCacheCorruptKey(t *testing.T) {
+	ocspCacheServerEnabled = true
+
+	// Build a JSON payload with a key that is valid base64 but does not decode
+	// to a valid ASN.1 certID structure.
+	corruptKey := base64.StdEncoding.EncodeToString([]byte("this-is-not-asn1"))
+	payload, err := json.Marshal(map[string]any{
+		corruptKey: []any{
+			float64(time.Now().UTC().Unix()),
+			base64.StdEncoding.EncodeToString([]byte("junk-not-ocsp")),
+		},
+	})
+	assertNilF(t, err, "marshalling test payload")
+
+	f, err := os.CreateTemp(t.TempDir(), "ocsp_cache_corrupt_*.json")
+	assertNilF(t, err, "creating temp cache file")
+	_, err = f.Write(payload)
+	assertNilF(t, err, "writing temp cache file")
+	assertNilF(t, f.Close(), "closing temp cache file")
+
+	origCacheFileName := cacheFileName
+	cacheFileName = f.Name()
+	defer func() { cacheFileName = origCacheFileName }()
+
+	// Must not panic.
+	initOCSPCache()
+
+	func() {
+		ocspResponseCacheLock.RLock()
+		defer ocspResponseCacheLock.RUnlock()
+		assertEqualF(t, len(ocspResponseCache), 0, "corrupt key from file must not be stored in cache")
+	}()
 }
