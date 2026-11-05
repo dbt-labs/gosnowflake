@@ -15,12 +15,12 @@ func TestExecResponseDataDecodesStats(t *testing.T) {
 	testcases := []struct {
 		name     string
 		body     string
-		expected *QueryResultStats
+		expected *queryResultStats
 	}{
 		{
 			name: "ctas",
 			body: `{"queryId":"q1","stats":{"numRowsInserted":3,"numRowsDeleted":0,"numRowsUpdated":0,"numDmlDuplicates":0}}`,
-			expected: &QueryResultStats{
+			expected: &queryResultStats{
 				NumRowsInserted:  int64Ptr(3),
 				NumRowsDeleted:   int64Ptr(0),
 				NumRowsUpdated:   int64Ptr(0),
@@ -30,7 +30,7 @@ func TestExecResponseDataDecodesStats(t *testing.T) {
 		{
 			name:     "merge reporting only the updated rows",
 			body:     `{"queryId":"q2","stats":{"numRowsUpdated":2}}`,
-			expected: &QueryResultStats{NumRowsUpdated: int64Ptr(2)},
+			expected: &queryResultStats{NumRowsUpdated: int64Ptr(2)},
 		},
 		{
 			name:     "no stats object, as for a view",
@@ -40,7 +40,7 @@ func TestExecResponseDataDecodesStats(t *testing.T) {
 		{
 			name:     "empty stats object",
 			body:     `{"queryId":"q4","stats":{}}`,
-			expected: &QueryResultStats{},
+			expected: &queryResultStats{},
 		},
 	}
 	for _, tc := range testcases {
@@ -87,17 +87,16 @@ func TestQueryArrowStreamExposesStats(t *testing.T) {
 		sc := statsTestConn(func(d *execResponseData) {
 			d.QueryID = "q1"
 			d.QueryResultFormat = "json"
-			d.Stats = &QueryResultStats{NumRowsInserted: int64Ptr(3)}
+			d.Stats = &queryResultStats{NumRowsInserted: int64Ptr(3), NumRowsDeleted: int64Ptr(0)}
 		}, nil)
 		loader, err := sc.QueryArrowStream(context.Background(), "create table t as select 1")
 		assertNilF(t, err)
 		provider, ok := loader.(QueryResultStatsProvider)
 		assertTrueF(t, ok, "the loader should implement QueryResultStatsProvider")
-		stats := provider.QueryResultStats()
-		assertNotNilF(t, stats)
-		assertNotNilF(t, stats.NumRowsInserted)
-		assertEqualE(t, *stats.NumRowsInserted, int64(3))
-		assertNilE(t, stats.NumRowsUpdated, "a count the server did not send must stay nil, not 0")
+		assertStat(t, provider.NumRowsInserted, 3, true)
+		assertStat(t, provider.NumRowsDeleted, 0, true)
+		assertStat(t, provider.NumRowsUpdated, 0, false)
+		assertStat(t, provider.NumDmlDuplicates, 0, false)
 	})
 	t.Run("no stats sent by the server", func(t *testing.T) {
 		sc := statsTestConn(func(d *execResponseData) {
@@ -106,12 +105,25 @@ func TestQueryArrowStreamExposesStats(t *testing.T) {
 		}, nil)
 		loader, err := sc.QueryArrowStream(context.Background(), "create view v as select 1")
 		assertNilF(t, err)
-		assertNilE(t, loader.(QueryResultStatsProvider).QueryResultStats())
+		provider := loader.(QueryResultStatsProvider)
+		assertStat(t, provider.NumRowsInserted, 0, false)
+		assertStat(t, provider.NumRowsDeleted, 0, false)
+		assertStat(t, provider.NumRowsUpdated, 0, false)
+		assertStat(t, provider.NumDmlDuplicates, 0, false)
 	})
 }
 
+// assertStat checks a provider method: found must be false for a count the server did not
+// send, so that it cannot be mistaken for a count of 0.
+func assertStat(t *testing.T, stat func() (int64, bool), expected int64, found bool) {
+	t.Helper()
+	got, ok := stat()
+	assertEqualE(t, ok, found)
+	assertEqualE(t, got, expected)
+}
+
 func TestQueryArrowStreamMultiStatementStatsFollowTheResultSet(t *testing.T) {
-	childStats := map[string]*QueryResultStats{
+	childStats := map[string]*queryResultStats{
 		"/queries/child1/result": {NumRowsInserted: int64Ptr(5)},
 		"/queries/child2/result": nil,
 		"/queries/child3/result": {NumRowsUpdated: int64Ptr(2)},
@@ -120,7 +132,7 @@ func TestQueryArrowStreamMultiStatementStatsFollowTheResultSet(t *testing.T) {
 		d.QueryID = "parent"
 		d.ResultIDs = "child1,child2,child3"
 		// the parent response of a multi statement does not describe any statement
-		d.Stats = &QueryResultStats{NumRowsInserted: int64Ptr(999)}
+		d.Stats = &queryResultStats{NumRowsInserted: int64Ptr(999)}
 	}, func(path string) *execResponseData {
 		stats, ok := childStats[path]
 		assertTrueF(t, ok, "unexpected result path "+path)
@@ -131,16 +143,13 @@ func TestQueryArrowStreamMultiStatementStatsFollowTheResultSet(t *testing.T) {
 	provider := loader.(QueryResultStatsProvider)
 
 	// the first child is loaded while the loader is created
-	stats := provider.QueryResultStats()
-	assertNotNilF(t, stats)
-	assertEqualE(t, *stats.NumRowsInserted, int64(5))
+	assertStat(t, provider.NumRowsInserted, 5, true)
 
 	assertNilF(t, loader.NextResultSet(context.Background()))
-	assertNilE(t, provider.QueryResultStats(), "the second statement reported no stats")
+	assertStat(t, provider.NumRowsInserted, 0, false)
+	assertStat(t, provider.NumRowsUpdated, 0, false)
 
 	assertNilF(t, loader.NextResultSet(context.Background()))
-	stats = provider.QueryResultStats()
-	assertNotNilF(t, stats)
-	assertEqualE(t, *stats.NumRowsUpdated, int64(2))
-	assertNilE(t, stats.NumRowsInserted)
+	assertStat(t, provider.NumRowsUpdated, 2, true)
+	assertStat(t, provider.NumRowsInserted, 0, false)
 }

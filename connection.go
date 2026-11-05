@@ -751,7 +751,7 @@ type QueryResultFormatProvider interface {
 	QueryResultFormat() string
 }
 
-// QueryResultStats are the DML counts Snowflake reports in the "stats" object of a query
+// queryResultStats are the DML counts Snowflake reports in the "stats" object of a query
 // response. A nil field means the server did not report that count; it is not the same as 0.
 //
 // Snowflake sends them for DML and for CREATE TABLE AS SELECT, where they are the only
@@ -759,7 +759,7 @@ type QueryResultFormatProvider interface {
 // without a query, CREATE TABLE ... CLONE, and a CTAS that writes no rows come without stats.
 //
 // This mirrors SnowflakeCursor.stats of snowflake-connector-python (v4.2.0 and later).
-type QueryResultStats struct {
+type queryResultStats struct {
 	NumRowsInserted  *int64 `json:"numRowsInserted,omitempty"`
 	NumRowsDeleted   *int64 `json:"numRowsDeleted,omitempty"`
 	NumRowsUpdated   *int64 `json:"numRowsUpdated,omitempty"`
@@ -767,17 +767,25 @@ type QueryResultStats struct {
 }
 
 // QueryResultStatsProvider is an optional interface that an ArrowStreamLoader may
-// implement to expose the DML counts reported for the statement. QueryResultStats returns
-// nil when the server sent no "stats" object. If multistatement is used, it describes the
-// current result set and is updated on each NextResultSet call.
+// implement to expose the DML counts reported for the statement, one metric per call.
+// Each method returns false when the server did not report that count, which is not the
+// same as a count of 0. If multistatement is used, the counts describe the current result
+// set and are updated on each NextResultSet call.
 //
 //	if p, ok := loader.(QueryResultStatsProvider); ok {
-//	    if stats := p.QueryResultStats(); stats != nil && stats.NumRowsInserted != nil {
-//	        fmt.Println(*stats.NumRowsInserted)
+//	    if n, ok := p.NumRowsInserted(); ok {
+//	        fmt.Println(n)
 //	    }
 //	}
 type QueryResultStatsProvider interface {
-	QueryResultStats() *QueryResultStats
+	// NumRowsInserted returns the number of rows inserted by the statement.
+	NumRowsInserted() (int64, bool)
+	// NumRowsDeleted returns the number of rows deleted by the statement.
+	NumRowsDeleted() (int64, bool)
+	// NumRowsUpdated returns the number of rows updated by the statement.
+	NumRowsUpdated() (int64, bool)
+	// NumDmlDuplicates returns the number of duplicate rows the server reported for the statement.
+	NumDmlDuplicates() (int64, bool)
 }
 
 type snowflakeArrowStreamChunkDownloader struct {
@@ -791,7 +799,7 @@ type snowflakeArrowStreamChunkDownloader struct {
 	resultIDs         []string
 	queryID           string
 	queryResultFormat string
-	stats             *QueryResultStats
+	stats             *queryResultStats
 }
 
 func (scd *snowflakeArrowStreamChunkDownloader) Location() *time.Location {
@@ -820,10 +828,39 @@ func (scd *snowflakeArrowStreamChunkDownloader) QueryResultFormat() string {
 	return scd.queryResultFormat
 }
 
-// QueryResultStats returns the DML counts the server reported for the current result set,
-// or nil when it sent none. The value is updated on each NextResultSet call.
-func (scd *snowflakeArrowStreamChunkDownloader) QueryResultStats() *QueryResultStats {
-	return scd.stats
+func (scd *snowflakeArrowStreamChunkDownloader) NumRowsInserted() (int64, bool) {
+	if scd.stats == nil {
+		return 0, false
+	}
+	return derefStat(scd.stats.NumRowsInserted)
+}
+
+func (scd *snowflakeArrowStreamChunkDownloader) NumRowsDeleted() (int64, bool) {
+	if scd.stats == nil {
+		return 0, false
+	}
+	return derefStat(scd.stats.NumRowsDeleted)
+}
+
+func (scd *snowflakeArrowStreamChunkDownloader) NumRowsUpdated() (int64, bool) {
+	if scd.stats == nil {
+		return 0, false
+	}
+	return derefStat(scd.stats.NumRowsUpdated)
+}
+
+func (scd *snowflakeArrowStreamChunkDownloader) NumDmlDuplicates() (int64, bool) {
+	if scd.stats == nil {
+		return 0, false
+	}
+	return derefStat(scd.stats.NumDmlDuplicates)
+}
+
+func derefStat(v *int64) (int64, bool) {
+	if v == nil {
+		return 0, false
+	}
+	return *v, true
 }
 
 // the server might have had an empty first batch, check if we can decode

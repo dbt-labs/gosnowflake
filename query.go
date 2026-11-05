@@ -136,7 +136,7 @@ type execResponseData struct {
 
 	// DML counts of the statement. nil when the server does not send them, which is the
 	// case for most statements other than DML and CREATE TABLE AS SELECT.
-	Stats *QueryResultStats `json:"stats,omitempty"`
+	Stats *queryResultStats `json:"stats,omitempty"`
 
 	// ping pong response data
 	GetResultURL      string        `json:"getResultUrl,omitempty"`
