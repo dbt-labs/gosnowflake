@@ -2,6 +2,10 @@
 
 ## Upcoming Release
 
+Security fixes:
+
+- Restricted workload identity authentication to recognized Snowflake hosts and hardened Azure identity requests (CVE-2026-86600; snowflakedb/gosnowflake#1844).
+
 Bug fixes:
 
 - Hardened OCSP response verification, cache validation, fail-open handling, and URL construction (CVE-2026-85525; snowflakedb/gosnowflake#1844).
