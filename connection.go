@@ -531,6 +531,8 @@ func (sc *snowflakeConn) GetQueryStatus(
 // type (e.g. CALL, SHOW). The returned loader also implements
 // QueryResultFormatProvider; callers should check the format before passing
 // batch streams to ipc.NewReader.
+// It also implements QueryResultStatsProvider, which exposes the DML counts the
+// server reports for the statement (for example the rows written by a CTAS).
 func (sc *snowflakeConn) QueryArrowStream(ctx context.Context, query string, bindings ...driver.NamedValue) (ArrowStreamLoader, error) {
 	ctx = WithArrowBatches(context.WithValue(ctx, asyncMode, false))
 	ctx = setResultType(ctx, queryResultType)
@@ -573,6 +575,7 @@ func (sc *snowflakeConn) QueryArrowStream(ctx context.Context, query string, bin
 		queryID:           data.Data.QueryID,
 		resultIDs:         resultIDs,
 		queryResultFormat: data.Data.QueryResultFormat,
+		stats:             data.Data.Stats,
 	}
 	// if multistatement is used, we need to set the first result set to actual result set, not the aggregated response
 	if scd.hasNextResultSet() {
@@ -712,6 +715,7 @@ func (asb *ArrowStreamBatch) GetStream(ctx context.Context) (io.ReadCloser, erro
 // accessible via JSONData(); column metadata is available via RowTypes().
 //
 // To determine the actual response format, use QueryResultFormatProvider.
+// To read the DML counts the server reports for the statement, use QueryResultStatsProvider.
 type ArrowStreamLoader interface {
 	// GetBatches returns the result for the current result set, if response was Arrow.
 	// If multistatement is used, this returns the batches for the current result set.
@@ -747,6 +751,43 @@ type QueryResultFormatProvider interface {
 	QueryResultFormat() string
 }
 
+// queryResultStats are the DML counts Snowflake reports in the "stats" object of a query
+// response. A nil field means the server did not report that count; it is not the same as 0.
+//
+// Snowflake sends them for DML and for CREATE TABLE AS SELECT, where they are the only
+// way to learn how many rows were written. Statements such as CREATE VIEW, CREATE TABLE
+// without a query, CREATE TABLE ... CLONE, and a CTAS that writes no rows come without stats.
+//
+// This mirrors SnowflakeCursor.stats of snowflake-connector-python (v4.2.0 and later).
+type queryResultStats struct {
+	NumRowsInserted  *int64 `json:"numRowsInserted,omitempty"`
+	NumRowsDeleted   *int64 `json:"numRowsDeleted,omitempty"`
+	NumRowsUpdated   *int64 `json:"numRowsUpdated,omitempty"`
+	NumDmlDuplicates *int64 `json:"numDmlDuplicates,omitempty"`
+}
+
+// QueryResultStatsProvider is an optional interface that an ArrowStreamLoader may
+// implement to expose the DML counts reported for the statement, one metric per call.
+// Each method returns false when the server did not report that count, which is not the
+// same as a count of 0. If multistatement is used, the counts describe the current result
+// set and are updated on each NextResultSet call.
+//
+//	if p, ok := loader.(QueryResultStatsProvider); ok {
+//	    if n, ok := p.NumRowsInserted(); ok {
+//	        fmt.Println(n)
+//	    }
+//	}
+type QueryResultStatsProvider interface {
+	// NumRowsInserted returns the number of rows inserted by the statement.
+	NumRowsInserted() (int64, bool)
+	// NumRowsDeleted returns the number of rows deleted by the statement.
+	NumRowsDeleted() (int64, bool)
+	// NumRowsUpdated returns the number of rows updated by the statement.
+	NumRowsUpdated() (int64, bool)
+	// NumDmlDuplicates returns the number of duplicate rows the server reported for the statement.
+	NumDmlDuplicates() (int64, bool)
+}
+
 type snowflakeArrowStreamChunkDownloader struct {
 	sc                *snowflakeConn
 	ChunkMetas        []execResponseChunk
@@ -758,6 +799,7 @@ type snowflakeArrowStreamChunkDownloader struct {
 	resultIDs         []string
 	queryID           string
 	queryResultFormat string
+	stats             *queryResultStats
 }
 
 func (scd *snowflakeArrowStreamChunkDownloader) Location() *time.Location {
@@ -784,6 +826,41 @@ func (scd *snowflakeArrowStreamChunkDownloader) QueryID() string {
 // The value is updated on each NextResultSet call.
 func (scd *snowflakeArrowStreamChunkDownloader) QueryResultFormat() string {
 	return scd.queryResultFormat
+}
+
+func (scd *snowflakeArrowStreamChunkDownloader) NumRowsInserted() (int64, bool) {
+	if scd.stats == nil {
+		return 0, false
+	}
+	return derefStat(scd.stats.NumRowsInserted)
+}
+
+func (scd *snowflakeArrowStreamChunkDownloader) NumRowsDeleted() (int64, bool) {
+	if scd.stats == nil {
+		return 0, false
+	}
+	return derefStat(scd.stats.NumRowsDeleted)
+}
+
+func (scd *snowflakeArrowStreamChunkDownloader) NumRowsUpdated() (int64, bool) {
+	if scd.stats == nil {
+		return 0, false
+	}
+	return derefStat(scd.stats.NumRowsUpdated)
+}
+
+func (scd *snowflakeArrowStreamChunkDownloader) NumDmlDuplicates() (int64, bool) {
+	if scd.stats == nil {
+		return 0, false
+	}
+	return derefStat(scd.stats.NumDmlDuplicates)
+}
+
+func derefStat(v *int64) (int64, bool) {
+	if v == nil {
+		return 0, false
+	}
+	return *v, true
 }
 
 // the server might have had an empty first batch, check if we can decode
@@ -889,6 +966,7 @@ func (scd *snowflakeArrowStreamChunkDownloader) NextResultSet(ctx context.Contex
 	scd.Qrmk = resp.Data.Qrmk
 	scd.ChunkHeader = resp.Data.ChunkHeaders
 	scd.queryResultFormat = resp.Data.QueryResultFormat
+	scd.stats = resp.Data.Stats
 	scd.RowSet = rowSetType{
 		RowType:      resp.Data.RowType,
 		JSON:         resp.Data.RowSet,
