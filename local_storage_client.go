@@ -90,15 +90,6 @@ func (util *localUtil) downloadOneFile(meta *fileMetadata) error {
 		return err
 	}
 	fullDstFileName := path.Join(user, baseName(meta.dstFileName))
-	baseDir, err := getDirectory()
-	if err != nil {
-		return err
-	}
-	if _, err = os.Stat(baseDir); os.IsNotExist(err) {
-		if err = os.MkdirAll(baseDir, os.ModePerm); err != nil {
-			return err
-		}
-	}
 
 	data, err := os.ReadFile(fullSrcFileName)
 	if err != nil {
