@@ -134,6 +134,10 @@ type execResponseData struct {
 	Qrmk               string                `json:"qrmk,omitempty"`
 	ChunkHeaders       map[string]string     `json:"chunkHeaders,omitempty"`
 
+	// DML counts of the statement. nil when the server does not send them, which is the
+	// case for most statements other than DML and CREATE TABLE AS SELECT.
+	Stats *queryResultStats `json:"stats,omitempty"`
+
 	// ping pong response data
 	GetResultURL      string        `json:"getResultUrl,omitempty"`
 	ProgressDesc      string        `json:"progressDesc,omitempty"`
