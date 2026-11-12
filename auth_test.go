@@ -970,6 +970,75 @@ func TestUnitAuthenticateWithConfigExternalBrowserWithFailedSAMLResponse(t *test
 	assertEqualE(t, err.Error(), "failed to get SAML response")
 }
 
+// fakeIDTokenStorage holds one cached ID token and records deletions. Like the real
+// cache, it refuses deletes under a relaxed lease; leases come from the real storage.
+type fakeIDTokenStorage struct {
+	secureStorageManager
+	token string
+	calls *[]string
+}
+
+func (s *fakeIDTokenStorage) getCredential(_ *Lease, spec *secureTokenSpec) (string, error) {
+	if spec.tokenType == idToken {
+		return s.token, nil
+	}
+	return "", nil
+}
+
+func (s *fakeIDTokenStorage) setCredential(_ *Lease, _ *secureTokenSpec, _ string) error {
+	return nil
+}
+
+func (s *fakeIDTokenStorage) deleteCredential(lease *Lease, spec *secureTokenSpec) error {
+	if lease != nil && lease.RelaxedReadAllowed {
+		return &LeaseError{Code: ErrFailedToRenewLease, InnerError: errors.New("relaxed lease")}
+	}
+	*s.calls = append(*s.calls, "delete "+string(spec.tokenType))
+	if spec.tokenType == idToken {
+		s.token = ""
+	}
+	return nil
+}
+
+func TestUnitAuthenticateWithConfigRejectedIDTokenFallbackStripsRegion(t *testing.T) {
+	var calls []string
+	realStorage := credentialsStorage
+	credentialsStorage = &fakeIDTokenStorage{secureStorageManager: realStorage, token: "bad-token", calls: &calls}
+	defer func() { credentialsStorage = realStorage }()
+
+	sc := getDefaultSnowflakeConn()
+	sc.cfg.Account = "my-org.eu-central-1"
+	sc.cfg.Authenticator = AuthTypeExternalBrowser
+	sc.cfg.ClientStoreTemporaryCredential = ConfigBoolTrue
+	sc.cfg.ExternalBrowserTimeout = defaultExternalBrowserTimeout
+	sc.ctx = context.Background()
+	sc.rest = &snowflakeRestful{
+		FuncPostAuth: func(_ context.Context, _ *snowflakeRestful, _ *http.Client, _ *url.Values, _ map[string]string, bodyCreator bodyCreatorType, _ time.Duration) (*authResponse, error) {
+			var ar authRequest
+			jsonBody, _ := bodyCreator()
+			if err := json.Unmarshal(jsonBody, &ar); err != nil {
+				return nil, err
+			}
+			calls = append(calls, "login "+ar.Data.Authenticator+" "+ar.Data.Token)
+			return &authResponse{Success: false, Message: "ID token is invalid", Code: "390195"}, nil
+		},
+		FuncPostAuthSAML: capturePostAuthSAMLAccount(&calls),
+		TokenAccessor:    getSimpleTokenAccessor(),
+	}
+
+	err := authenticateWithConfig(sc)
+	assertNotNilF(t, err)
+	// The first pass runs on a relaxed lease, so the delete is refused and the login
+	// restarts with a real lease. authenticate and the fallback each delete the token.
+	assertDeepEqualE(t, calls, []string{
+		"login ID_TOKEN bad-token",
+		"login ID_TOKEN bad-token",
+		"delete ID_TOKEN",
+		"delete ID_TOKEN",
+		"saml my-org",
+	})
+}
+
 func TestUnitAuthenticateExternalBrowser(t *testing.T) {
 	var err error
 	lease, _ := credentialsStorage.acquireLease()
