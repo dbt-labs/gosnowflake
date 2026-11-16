@@ -127,6 +127,7 @@ func getIdpURLProofKey(
 		OsVersion:   platform,
 	}
 
+	account = parseAccount(account)
 	requestMain := authRequestData{
 		ClientAppID:             clientType,
 		ClientAppVersion:        SnowflakeGoDriverVersion,

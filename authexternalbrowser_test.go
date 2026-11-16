@@ -2,6 +2,7 @@ package gosnowflake
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -84,6 +85,35 @@ func postAuthExternalBrowserFailWithCode(_ context.Context, _ *snowflakeRestful,
 		Message: "failed to connect to db",
 		Code:    "260008",
 	}, nil
+}
+
+// capturePostAuthSAMLAccount records the ACCOUNT_NAME of each SSO request and fails it.
+func capturePostAuthSAMLAccount(calls *[]string) func(context.Context, *snowflakeRestful, map[string]string, []byte, time.Duration) (*authResponse, error) {
+	return func(_ context.Context, _ *snowflakeRestful, _ map[string]string, body []byte, _ time.Duration) (*authResponse, error) {
+		var ar authRequest
+		if err := json.Unmarshal(body, &ar); err != nil {
+			return nil, err
+		}
+		*calls = append(*calls, "saml "+ar.Data.AccountName)
+		return nil, errors.New("stop after the SSO request")
+	}
+}
+
+func TestUnitGetIdpURLProofKeyStripsRegionFromAccount(t *testing.T) {
+	for account, expected := range map[string]string{
+		"my-org.eu-central-1": "my-org",
+		"ktb38830":            "ktb38830",
+		"orgname-acct_name":   "orgname-acct_name",
+	} {
+		var calls []string
+		sr := &snowflakeRestful{
+			FuncPostAuthSAML: capturePostAuthSAMLAccount(&calls),
+			TokenAccessor:    getSimpleTokenAccessor(),
+		}
+		_, _, err := getIdpURLProofKey(context.Background(), sr, "EXTERNALBROWSER", "testapp", account, "u", 55555)
+		assertNotNilF(t, err)
+		assertDeepEqualE(t, calls, []string{"saml " + expected}, account)
+	}
 }
 
 func TestUnitAuthenticateByExternalBrowser(t *testing.T) {

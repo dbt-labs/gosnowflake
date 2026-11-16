@@ -70,6 +70,7 @@ func authenticateBySAML(
 		Os:          operatingSystem,
 		OsVersion:   platform,
 	}
+	account = parseAccount(account)
 	requestMain := authRequestData{
 		ClientAppID:       clientType,
 		ClientAppVersion:  SnowflakeGoDriverVersion,

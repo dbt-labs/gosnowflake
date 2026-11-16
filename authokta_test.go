@@ -214,6 +214,18 @@ func getSSOSuccessButWrongPrefixURL(_ context.Context, _ *snowflakeRestful, _ *u
 	return []byte(`<html><form id="1" action="https&#x3a;&#x2f;&#x2f;1abc.com&#x2f;"></form></html>`), nil
 }
 
+func TestUnitAuthenticateBySAMLStripsRegionFromAccount(t *testing.T) {
+	var calls []string
+	sr := &snowflakeRestful{
+		FuncPostAuthSAML: capturePostAuthSAMLAccount(&calls),
+		TokenAccessor:    getSimpleTokenAccessor(),
+	}
+	oktaURL := &url.URL{Scheme: "https", Host: "abc.okta.com"}
+	_, err := authenticateBySAML(context.Background(), sr, oktaURL, "testapp", "my-org.eu-central-1", "u", "p", ConfigBoolFalse)
+	assertNotNilF(t, err)
+	assertDeepEqualE(t, calls, []string{"saml my-org"})
+}
+
 func TestUnitAuthenticateBySAML(t *testing.T) {
 	authenticator := &url.URL{
 		Scheme: "https",
