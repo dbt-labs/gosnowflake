@@ -67,7 +67,7 @@ for attempt in $(seq 1 30); do
   echo "go test attempt $attempt exit code: $? (ignored; compared against baseline)"
 
   NEW_PANICS="$(jq -r 'select(.Action == "output" and .Test != null and (.Output | test("^panic: "))) |
-                       "\(.Package) \(.Test | split("/")[0])"' "$RESULT" | LC_ALL=C sort -u)"
+                       "\(.Package) \(.Test | split("/")[0])"' "$RESULT" | tr -d '\r' | LC_ALL=C sort -u)"
   [[ -z "$NEW_PANICS" ]] && break
   echo "::warning::panicking tests, re-running without them:"
   echo "$NEW_PANICS"
@@ -76,13 +76,14 @@ for attempt in $(seq 1 30); do
   if [[ "$attempt" == 30 ]]; then echo "::error::too many panicking tests"; exit 1; fi
 done
 
+# (jq on Windows emits CRLF, hence the tr.)
 # Failing tests (including subtests), plus packages that failed as a whole
 # (build failure, timeout, ...) so a package-level break is never hidden.
 {
   jq -r 'select(.Action == "fail") |
          if .Test then "\(.Package) \(.Test)" else "\(.Package) [package]" end' "$RESULT"
   cat "$PANICKED"
-} | LC_ALL=C sort -u > "$FAILURES"
+} | tr -d '\r' | LC_ALL=C sort -u > "$FAILURES"
 
 if [[ ! -f "$BASELINE" ]]; then
   echo "::error::No baseline for $OS_NAME at ci/dbt/baseline/$OS_NAME.txt."
