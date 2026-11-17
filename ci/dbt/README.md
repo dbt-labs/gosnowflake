@@ -1,0 +1,54 @@
+# dbt fork CI
+
+CI for the dbt fork lives only in new files so merging upstream never conflicts:
+`.github/workflows/dbt-ci.yml` and this directory.
+
+## Upstream workflows are disabled, not edited
+
+The workflows inherited from upstream (`build-test.yml`, `changelog.yml`, `cla_bot.yml`,
+`jira_*.yml`, `semgrep.yml`) need Snowflake-internal secrets and services. They are
+disabled in the repo's Actions settings, which does not touch the files:
+
+    gh workflow list --all
+    gh workflow disable <file>.yml
+
+This is keyed by file path. If a merge brings in a new upstream workflow it starts
+enabled; disable it too. Only the `dbt-ci gate` check is required for merging.
+
+## Test gate
+
+Most tests need a live Snowflake account and fail without one. `ci/dbt/test.sh` runs the
+suite with `SKIP_SETUP=1` (plus wiremock) and fails only on failures that are not in
+`ci/dbt/baseline/<os>.txt`. Package-level failures (build errors, panics, timeouts) are
+recorded as `<package> [package]`, so they are never silently ignored.
+A panicking test aborts its whole package, so the script records it as failed, re-runs
+without it, and repeats until a run completes. Otherwise every test after the panic would
+silently not run.
+
+### Flaky and timing-sensitive tests
+
+- `no-race-tests.txt`: tests that depend on wall-clock timing (the file-lease tests use
+  TTLs of a few hundred ms and a 12ms grace period). The race detector's slowdown breaks
+  those assumptions, so they run in a second pass without `-race`. Locally, under full CPU
+  load, `TestConcurrentLeaseAcquireWithRandomDurationProcesses` failed 16 of 25 runs with
+  `-race` and 0 of 25 without it.
+- `retry-tests.txt`: tests that depend on the external network (for example
+  `expired.badssl.com`). A failing one is retried up to twice and only counts as failed if
+  every attempt fails; a pass on retry is reported as a warning.
+
+Add a test to either list only after finding why it is unstable, and say why in a comment.
+Prefer fixing the test or the code (see the OAuth cache fix) over listing it.
+
+Baseline files may contain `#` comments: whole-line comments, and a trailing ` # panic`
+on tests that crashed the test binary (the delimiter is ` #`, not `#`, because Go subtest
+names can contain `#01`). Comments are ignored when comparing.
+
+When a test in the baseline starts passing, the `report` job in `dbt-ci.yml` posts (and
+keeps updated) a single PR comment listing it per OS, so the baseline can be shrunk. It
+only reports; it never fails the PR.
+
+Recording or updating a baseline: run the workflow, download the `test-output-<os>`
+artifact, and commit its `failures-<os>.txt` as `ci/dbt/baseline/<os>.txt`. Until a
+baseline exists for an OS, that OS's job fails and prints this instruction.
+
+Review baseline changes in PRs: a growing baseline means a regression was accepted.

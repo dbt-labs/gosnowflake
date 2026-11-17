@@ -1,0 +1,10 @@
+# Tests whose correctness depends on wall-clock timing (lease TTLs of a few hundred ms and a
+# 12ms grace period). The race detector's slowdown breaks those assumptions, so ci/dbt/test.sh
+# runs them in a second pass without -race. One top-level test name per line.
+TestLeaseAcquireRenewAndExpire
+TestLeaseAcquireAndRelease
+TestRenewBrokenLease
+TestSingleProcessLeaseAcquire
+TestConcurrentLeaseAcquire
+TestConcurrentLeaseAcquireWithRandomDurationProcesses
+TestConcurrentLeaseAcquireWithFittingTTL
