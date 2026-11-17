@@ -52,15 +52,37 @@ if [[ -z "${DBT_CI_NO_WIREMOCK:-}" ]]; then
 fi
 
 cd "$ROOT_DIR"
-# shellcheck disable=SC2086
-go test -race -count=1 -timeout 30m -json ${DBT_CI_TEST_ARGS:-./...} > "$OUT_DIR/test-$OS_NAME.json"
-echo "go test exit code: $? (ignored; compared against baseline)"
+# A panicking test aborts its whole package and hides every test that has not run yet.
+# So: record the panicking test as failed, re-run skipping it, and repeat until a run
+# finishes without a panic. Failures come from the final run plus the panicked tests.
+PANICKED="$OUT_DIR/panicked-$OS_NAME.txt"
+: > "$PANICKED"
+SKIP_RE=""
+RESULT="$OUT_DIR/test-$OS_NAME.json"
+for attempt in $(seq 1 30); do
+  SKIP_ARGS=()
+  [[ -n "$SKIP_RE" ]] && SKIP_ARGS=(-skip "^($SKIP_RE)\$")
+  # shellcheck disable=SC2086
+  go test -race -count=1 -timeout 30m -json ${SKIP_ARGS[@]+"${SKIP_ARGS[@]}"} ${DBT_CI_TEST_ARGS:-./...} > "$RESULT"
+  echo "go test attempt $attempt exit code: $? (ignored; compared against baseline)"
+
+  NEW_PANICS="$(jq -r 'select(.Action == "output" and .Test != null and (.Output | test("^panic: "))) |
+                       "\(.Package) \(.Test | split("/")[0])"' "$RESULT" | LC_ALL=C sort -u)"
+  [[ -z "$NEW_PANICS" ]] && break
+  echo "::warning::panicking tests, re-running without them:"
+  echo "$NEW_PANICS"
+  echo "$NEW_PANICS" >> "$PANICKED"
+  SKIP_RE="$(awk '{print $2}' "$PANICKED" | LC_ALL=C sort -u | paste -sd'|' -)"
+  if [[ "$attempt" == 30 ]]; then echo "::error::too many panicking tests"; exit 1; fi
+done
 
 # Failing tests (including subtests), plus packages that failed as a whole
-# (build failure, panic, timeout) so a package-level break is never hidden.
-jq -r 'select(.Action == "fail") |
-       if .Test then "\(.Package) \(.Test)" else "\(.Package) [package]" end' \
-  "$OUT_DIR/test-$OS_NAME.json" | LC_ALL=C sort -u > "$FAILURES"
+# (build failure, timeout, ...) so a package-level break is never hidden.
+{
+  jq -r 'select(.Action == "fail") |
+         if .Test then "\(.Package) \(.Test)" else "\(.Package) [package]" end' "$RESULT"
+  cat "$PANICKED"
+} | LC_ALL=C sort -u > "$FAILURES"
 
 if [[ ! -f "$BASELINE" ]]; then
   echo "::error::No baseline for $OS_NAME at ci/dbt/baseline/$OS_NAME.txt."

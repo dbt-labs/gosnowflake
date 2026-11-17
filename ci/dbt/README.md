@@ -21,6 +21,9 @@ Most tests need a live Snowflake account and fail without one. `ci/dbt/test.sh` 
 suite with `SKIP_SETUP=1` (plus wiremock) and fails only on failures that are not in
 `ci/dbt/baseline/<os>.txt`. Package-level failures (build errors, panics, timeouts) are
 recorded as `<package> [package]`, so they are never silently ignored.
+A panicking test aborts its whole package, so the script records it as failed, re-runs
+without it, and repeats until a run completes. Otherwise every test after the panic would
+silently not run.
 
 Recording or updating a baseline: run the workflow, download the `test-output-<os>`
 artifact, and commit its `failures-<os>.txt` as `ci/dbt/baseline/<os>.txt`. Until a
