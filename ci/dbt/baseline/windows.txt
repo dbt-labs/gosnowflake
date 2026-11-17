@@ -1,3 +1,5 @@
+# Failing tests recorded by ci/dbt/test.sh. '# panic' marks tests that crashed the
+# test binary (they are skipped and re-run, see ci/dbt/README.md).
 github.com/snowflakedb/gosnowflake TestAddLogError
 github.com/snowflakedb/gosnowflake TestAddingQueryContextCacheEntry
 github.com/snowflakedb/gosnowflake TestArray
@@ -23,7 +25,7 @@ github.com/snowflakedb/gosnowflake TestAsyncModeCancel
 github.com/snowflakedb/gosnowflake TestAsyncModeMultiStatement
 github.com/snowflakedb/gosnowflake TestAsyncModePing
 github.com/snowflakedb/gosnowflake TestAsyncQueryFail
-github.com/snowflakedb/gosnowflake TestAuthorizationCodeFlow
+github.com/snowflakedb/gosnowflake TestAuthorizationCodeFlow # panic
 github.com/snowflakedb/gosnowflake TestBeginCreatesTransaction
 github.com/snowflakedb/gosnowflake TestBindingArray
 github.com/snowflakedb/gosnowflake TestBindingArrayOfObjects
@@ -146,7 +148,7 @@ github.com/snowflakedb/gosnowflake TestMapAndMetadataAsString
 github.com/snowflakedb/gosnowflake TestMapOfArrays
 github.com/snowflakedb/gosnowflake TestMapOfObjects
 github.com/snowflakedb/gosnowflake TestMapWithNullValues
-github.com/snowflakedb/gosnowflake TestMfaParallelLogin
+github.com/snowflakedb/gosnowflake TestMfaParallelLogin # panic
 github.com/snowflakedb/gosnowflake TestMultiStatementArrowFormat
 github.com/snowflakedb/gosnowflake TestMultiStatementCountMismatch
 github.com/snowflakedb/gosnowflake TestMultiStatementCountZero
@@ -263,7 +265,7 @@ github.com/snowflakedb/gosnowflake TestUUID
 github.com/snowflakedb/gosnowflake TestUUID/Arrow
 github.com/snowflakedb/gosnowflake TestUUID/JSON
 github.com/snowflakedb/gosnowflake TestUnitAuthenticateWithConfigMFA
-github.com/snowflakedb/gosnowflake TestUnitAuthenticateWithExternalBrowserParallel
+github.com/snowflakedb/gosnowflake TestUnitAuthenticateWithExternalBrowserParallel # panic
 github.com/snowflakedb/gosnowflake TestUnitDownloadWithInvalidLocalPath
 github.com/snowflakedb/gosnowflake TestUnitGetLocalFilePathFromCommand
 github.com/snowflakedb/gosnowflake TestUnitHandleMultiExec
@@ -273,7 +275,7 @@ github.com/snowflakedb/gosnowflake TestUnitProcessFileCompressionType
 github.com/snowflakedb/gosnowflake TestUpdateMetadataWithPresignedUrl
 github.com/snowflakedb/gosnowflake TestUpdateMetadataWithPresignedUrlError
 github.com/snowflakedb/gosnowflake TestUpdateMetadataWithPresignedUrlForDownload
-github.com/snowflakedb/gosnowflake TestUrlDecodeIfNeededE2E
+github.com/snowflakedb/gosnowflake TestUrlDecodeIfNeededE2E # panic
 github.com/snowflakedb/gosnowflake TestValidateDatabaseParameter
 github.com/snowflakedb/gosnowflake TestValidateDatabaseParameter/invalid_database_and_schema
 github.com/snowflakedb/gosnowflake TestValidateDatabaseParameter/invalid_role

@@ -25,6 +25,14 @@ A panicking test aborts its whole package, so the script records it as failed, r
 without it, and repeats until a run completes. Otherwise every test after the panic would
 silently not run.
 
+Baseline files may contain `#` comments: whole-line comments, and a trailing ` # panic`
+on tests that crashed the test binary (the delimiter is ` #`, not `#`, because Go subtest
+names can contain `#01`). Comments are ignored when comparing.
+
+When a test in the baseline starts passing, the `report` job in `dbt-ci.yml` posts (and
+keeps updated) a single PR comment listing it per OS, so the baseline can be shrunk. It
+only reports; it never fails the PR.
+
 Recording or updating a baseline: run the workflow, download the `test-output-<os>`
 artifact, and commit its `failures-<os>.txt` as `ci/dbt/baseline/<os>.txt`. Until a
 baseline exists for an OS, that OS's job fails and prints this instruction.

@@ -79,11 +79,20 @@ done
 # (jq on Windows emits CRLF, hence the tr.)
 # Failing tests (including subtests), plus packages that failed as a whole
 # (build failure, timeout, ...) so a package-level break is never hidden.
+# Baseline/failure files may hold "# ..." comments: whole-line comments, and a trailing
+# " # panic" on tests that crashed the test binary. Strip them before comparing. The
+# delimiter is " #" (not a bare "#") because Go subtest names can contain "#01".
+normalize() { tr -d '\r' | sed -E -e 's/[[:space:]]+#.*$//' -e '/^#/d' -e '/^[[:space:]]*$/d' | LC_ALL=C sort -u; }
+
 {
-  jq -r 'select(.Action == "fail") |
-         if .Test then "\(.Package) \(.Test)" else "\(.Package) [package]" end' "$RESULT"
-  cat "$PANICKED"
-} | tr -d '\r' | LC_ALL=C sort -u > "$FAILURES"
+  echo "# Failing tests recorded by ci/dbt/test.sh. '# panic' marks tests that crashed the"
+  echo "# test binary (they are skipped and re-run, see ci/dbt/README.md)."
+  {
+    jq -r 'select(.Action == "fail") |
+           if .Test then "\(.Package) \(.Test)" else "\(.Package) [package]" end' "$RESULT" | normalize
+    sed 's/$/ # panic/' "$PANICKED" | tr -d '\r'
+  } | LC_ALL=C sort -u
+} > "$FAILURES"
 
 if [[ ! -f "$BASELINE" ]]; then
   echo "::error::No baseline for $OS_NAME at ci/dbt/baseline/$OS_NAME.txt."
@@ -91,10 +100,14 @@ if [[ ! -f "$BASELINE" ]]; then
   exit 1
 fi
 
-NEW="$(LC_ALL=C comm -13 <(LC_ALL=C sort -u "$BASELINE") "$FAILURES")"
-FIXED="$(LC_ALL=C comm -23 <(LC_ALL=C sort -u "$BASELINE") "$FAILURES")"
+normalize < "$BASELINE" > "$OUT_DIR/baseline-$OS_NAME.norm"
+normalize < "$FAILURES" > "$OUT_DIR/failures-$OS_NAME.norm"
+NEW="$(LC_ALL=C comm -13 "$OUT_DIR/baseline-$OS_NAME.norm" "$OUT_DIR/failures-$OS_NAME.norm")"
+FIXED="$(LC_ALL=C comm -23 "$OUT_DIR/baseline-$OS_NAME.norm" "$OUT_DIR/failures-$OS_NAME.norm")"
+# Picked up by the "report" job in dbt-ci.yml, which comments on the PR.
+printf '%s\n' "$FIXED" | sed '/^$/d' > "$OUT_DIR/fixed-$OS_NAME.txt"
 
-echo "baseline failures: $(wc -l < "$BASELINE" | tr -d ' '), current failures: $(wc -l < "$FAILURES" | tr -d ' ')"
+echo "baseline failures: $(wc -l < "$OUT_DIR/baseline-$OS_NAME.norm" | tr -d ' '), current failures: $(wc -l < "$OUT_DIR/failures-$OS_NAME.norm" | tr -d ' ')"
 if [[ -n "$FIXED" ]]; then
   echo "::notice::tests in the baseline that now pass (consider shrinking the baseline):"
   echo "$FIXED"
