@@ -317,9 +317,6 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 	roundTripper := newCountingRoundTripper(createTestNoRevocationTransport())
 
 	t.Run("successful flow", func(t *testing.T) {
-		lease, err := credentialsStorage.acquireLease()
-		assertNilF(t, err)
-		defer lease.Release()
 		wiremock.registerMappings(t,
 			newWiremockMapping("auth/oauth2/authorization_code/successful_flow.json"),
 			newWiremockMapping("auth/oauth2/login_request.json"),
@@ -331,8 +328,13 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		cfg.Transporter = roundTripper
 		oauthAccessTokenSpec := newOAuthAccessTokenSpec(cfg.OauthTokenRequestURL, cfg.User)
 		oauthRefreshTokenSpec := newOAuthRefreshTokenSpec(cfg.OauthTokenRequestURL, cfg.User)
+		// Release the lease before connecting: the connector needs to acquire its own to
+		// cache the token and would otherwise wait for this one to expire.
+		lease, err := credentialsStorage.acquireLease()
+		assertNilF(t, err)
 		credentialsStorage.deleteCredential(lease, oauthAccessTokenSpec)
 		credentialsStorage.deleteCredential(lease, oauthRefreshTokenSpec)
+		assertNilF(t, lease.Release())
 		connector := NewConnector(SnowflakeDriver{}, *cfg)
 		db := sql.OpenDB(connector)
 		runSmokeQuery(t, db)
