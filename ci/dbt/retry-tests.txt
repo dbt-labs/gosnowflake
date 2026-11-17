@@ -1,0 +1,3 @@
+# Tests that depend on the external network. If one fails, ci/dbt/test.sh retries it up to
+# twice and only counts it as failed if every attempt fails. One top-level test name per line.
+TestExpiredCertificate # connects to expired.badssl.com; the error differs when the connection is reset
