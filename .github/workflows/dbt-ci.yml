@@ -60,9 +60,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Test
-        shell: bash
-        run: ./ci/dbt/test.sh
+        run: python ci/dbt/test.py
       - name: Upload test output
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
@@ -108,11 +110,11 @@ jobs:
             echo "$marker"
             echo "These tests are in the baseline (\`ci/dbt/baseline/\`) but now pass. Remove them from the baseline:"
             found=0
-            for f in out/*/fixed-*.txt; do
-              [[ -s "$f" ]] || continue
+            for f in out/*/fixed-*.json; do
+              jq -e 'length > 0' "$f" > /dev/null || continue
               found=1
-              os="$(basename "$f" .txt)"; os="${os#fixed-}"
-              printf '\n**%s**\n```\n' "$os"; cat "$f"; printf '```\n'
+              os="$(basename "$f" .json)"; os="${os#fixed-}"
+              printf '\n**%s**\n```\n' "$os"; jq -r '.[].test' "$f"; printf '```\n'
             done
           } > comment.md
           id="$(gh api "repos/$REPO/issues/$PR/comments" --paginate \

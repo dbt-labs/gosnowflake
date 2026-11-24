@@ -1,0 +1,20 @@
+{
+  "no_race": {
+    "reason": "Timing-sensitive: the file lease uses TTLs of a few hundred ms and a 12ms grace period, which the race detector's slowdown breaks. Run in a second pass without -race.",
+    "tests": [
+      "TestConcurrentLeaseAcquire",
+      "TestConcurrentLeaseAcquireWithFittingTTL",
+      "TestConcurrentLeaseAcquireWithRandomDurationProcesses",
+      "TestLeaseAcquireAndRelease",
+      "TestLeaseAcquireRenewAndExpire",
+      "TestRenewBrokenLease",
+      "TestSingleProcessLeaseAcquire"
+    ]
+  },
+  "retry": {
+    "reason": "Depend on the external network (TestExpiredCertificate connects to expired.badssl.com and fails differently when the connection is reset). A failing test is retried up to twice.",
+    "tests": [
+      "TestExpiredCertificate"
+    ]
+  }
+}
