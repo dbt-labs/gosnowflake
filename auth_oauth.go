@@ -97,6 +97,9 @@ type oauthBrowserResult struct {
 // authenticateWithConfig retry with an acquired lease. Otherwise the write fails
 // silently and the freshly obtained token is never cached.
 func ensureLeaseForCacheWrite(lease *Lease) error {
+	if lease == nil {
+		return errNilLease
+	}
 	if !lease.RelaxedReadAllowed {
 		return nil
 	}
