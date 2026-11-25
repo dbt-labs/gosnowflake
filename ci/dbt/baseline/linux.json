@@ -2,8 +2,6 @@
   "github.com/snowflakedb/gosnowflake": {
     "package_failed": true,
     "panicked": [
-      "TestMfaParallelLogin",
-      "TestUnitAuthenticateWithExternalBrowserParallel",
       "TestUrlDecodeIfNeededE2E"
     ],
     "failed": [
@@ -82,7 +80,6 @@
       "TestCancelQuery",
       "TestClientSessionKeepAliveParameter",
       "TestCommentOnlyQuery",
-      "TestConcurrentLeaseAcquireWithRandomDurationProcesses",
       "TestConcurrentReadOnParams",
       "TestConfigureEasyLoggingOnlyOnceWhenInitializedWithoutConfigFilePath",
       "TestConfigureEasyLoggingOnlyOnceWhenInitializedWithoutConfigFilePath/application_directory",
@@ -153,6 +150,11 @@
       "TestMapOfArrays",
       "TestMapOfObjects",
       "TestMapWithNullValues",
+      "TestMfaParallelLogin",
+      "TestMfaParallelLogin/starts_without_mfa_token,_first_attempt_fails,_singleAuthenticationPrompt=false",
+      "TestMfaParallelLogin/starts_without_mfa_token,_first_attempt_fails,_singleAuthenticationPrompt=true",
+      "TestMfaParallelLogin/starts_without_mfa_token,_singleAuthenticationPrompt=false",
+      "TestMfaParallelLogin/starts_without_mfa_token,_singleAuthenticationPrompt=true",
       "TestMultiStatementArrowFormat",
       "TestMultiStatementCountMismatch",
       "TestMultiStatementCountZero",
@@ -269,6 +271,8 @@
       "TestUUID/Arrow",
       "TestUUID/JSON",
       "TestUnitAuthenticateWithConfigMFA",
+      "TestUnitAuthenticateWithExternalBrowserParallel",
+      "TestUnitAuthenticateWithExternalBrowserParallel/no_ID_token_cached",
       "TestUnitDownloadWithInvalidLocalPath",
       "TestUnitGetLocalFilePathFromCommand",
       "TestUnitHandleMultiExec",

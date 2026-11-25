@@ -78,8 +78,6 @@
       "TestCRUD",
       "TestCallStatement",
       "TestCancelQuery",
-      "TestClientCredentialsFlow",
-      "TestClientCredentialsFlow/should_use_cached_access_token",
       "TestClientSessionKeepAliveParameter",
       "TestCommentOnlyQuery",
       "TestConcurrentReadOnParams",
