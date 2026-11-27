@@ -266,6 +266,9 @@ func doAuthenticateByExternalBrowser(
 	disableConsoleLogin ConfigBool,
 ) authenticateByExternalBrowserResult {
 	var err error
+	if lease == nil {
+		return authenticateByExternalBrowserResult{nil, nil, errNilLease}
+	}
 	// Never open a browser tab based on a relaxed read of the credentials cache
 	if lease.RelaxedReadAllowed {
 		err = lease.Renew(leaseTTL()) // will return with ErrFailedToRenewLease if lease is broken

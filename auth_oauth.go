@@ -90,6 +90,22 @@ type oauthBrowserResult struct {
 	err          error
 }
 
+// The first authentication attempt runs with a broken lease and relaxed (read-only)
+// cache access, see authenticateWithConfig. Cache hits work like that, but a cache miss
+// ends in a token write that needs a real lease. Ask for one before doing the expensive
+// work (network request or browser login): the resulting ErrFailedToRenewLease makes
+// authenticateWithConfig retry with an acquired lease. Otherwise the write fails
+// silently and the freshly obtained token is never cached.
+func ensureLeaseForCacheWrite(lease *Lease) error {
+	if lease == nil {
+		return errNilLease
+	}
+	if !lease.RelaxedReadAllowed {
+		return nil
+	}
+	return lease.Renew(leaseTTL() / 2)
+}
+
 func (oauthClient *oauthClient) authenticateByOAuthAuthorizationCode(lease *Lease) (string, error) {
 	accessTokenSpec := oauthClient.accessTokenSpec()
 	if oauthClient.cfg.ClientStoreTemporaryCredential == ConfigBoolTrue {
@@ -99,6 +115,9 @@ func (oauthClient *oauthClient) authenticateByOAuthAuthorizationCode(lease *Leas
 		}
 		if refreshToken, _ := credentialsStorage.getCredential(lease, oauthClient.refreshTokenSpec()); refreshToken != "" {
 			return "", &SnowflakeError{Number: ErrMissingAccessATokenButRefreshTokenPresent}
+		}
+		if err := ensureLeaseForCacheWrite(lease); err != nil {
+			return "", err
 		}
 	}
 	logger.Debugf("Access token not present in cache, running full auth code flow")
@@ -359,6 +378,9 @@ func (oauthClient *oauthClient) authenticateByOAuthClientCredentials(lease *Leas
 				return "", fmt.Errorf("error retrieving access token from cache: %w", err)
 			}
 			return accessToken, nil
+		}
+		if err := ensureLeaseForCacheWrite(lease); err != nil {
+			return "", err
 		}
 	}
 	oauth2Cfg, err := oauthClient.buildClientCredentialsConfig()
