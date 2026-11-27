@@ -231,6 +231,10 @@ func (ssm *fileBasedSecureStorageManager) acquireLease() (*Lease, error) {
 
 func (ssm *fileBasedSecureStorageManager) withCacheFile(lease *Lease, relaxed bool, action func(*os.File) error) error {
 	var err error
+	if lease == nil {
+		logger.Warnf("Unable to access the cache. %v", errNilLease)
+		return errNilLease
+	}
 	// When relaxed is true, we do not renew the lease before running action on the
 	// file. relaxed=true must never be used for write operations.
 	if !relaxed {
@@ -408,7 +412,7 @@ func (ssm *fileBasedSecureStorageManager) getCredential(lease *Lease, tokenSpec 
 	}
 
 	ret := ""
-	err = ssm.withCacheFile(lease, lease.RelaxedReadAllowed, func(cacheFile *os.File) error {
+	err = ssm.withCacheFile(lease, lease.relaxedReadAllowed(), func(cacheFile *os.File) error {
 		credCache, err := ssm.readTemporaryCacheFile(cacheFile)
 		if err != nil {
 			logger.Warnf("Error while reading cache file. %v", err)

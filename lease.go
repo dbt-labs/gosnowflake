@@ -4,6 +4,7 @@ import (
 	"bytes"
 	entropy "crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	// "github.com/timandy/routine"
 	"io"
@@ -47,6 +48,10 @@ const (
 	ErrFailedToRenewLease
 )
 
+// errNilLease is returned when an operation that needs a lease is given a nil one. This
+// is a caller bug, so unlike a broken lease it is not retried with an acquired lease.
+var errNilLease = errors.New("lease: no lease provided")
+
 type LeaseError struct {
 	Code       int
 	InnerError error
@@ -54,6 +59,11 @@ type LeaseError struct {
 
 func (e *LeaseError) Error() string {
 	return e.InnerError.Error()
+}
+
+// relaxedReadAllowed is RelaxedReadAllowed that is safe to call on a nil lease.
+func (lease *Lease) relaxedReadAllowed() bool {
+	return lease != nil && lease.RelaxedReadAllowed
 }
 
 // Ensure the lease will be valid for at least the given TTL. Users should
