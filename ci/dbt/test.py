@@ -80,22 +80,31 @@ def go_test(result, race, run, skip, extra):
         return subprocess.run(cmd, cwd=ROOT_DIR, stdout=f).returncode
 
 
-def run_pass(result, race, run, skip, extra, panicked):
-    """Runs go test. A panicking test aborts its whole package and hides every test that has
-    not run yet, so record it as failed, re-run without it, and repeat until a run
-    finishes without a panic. `panicked` accumulates across passes."""
+def run_pass(result, race, run, skip, extra):
+    """Runs go test until a pass completes without any test panicking.
+
+    A panic aborts its whole package and hides remaining tests in that package. On each
+    panic, we record the panicking test(s) in `panicked` and re-run with them skipped so
+    the rest of the suite executes. Returns (events, panicked), where `events` is from the
+    final panic-free attempt (which re-ran all non-panicking tests) and `panicked` contains
+    every test that panicked across attempts (still counted as failures against the baseline).
+    """
+    panicked = set()
     for attempt in range(1, MAX_PANIC_RERUNS + 1):
+        attempt_result = result.with_stem(f"{result.stem}-attempt{attempt}")
         skip_all = set(skip) | {t for _, t in panicked}
-        rc = go_test(result, race, run, skip_all, extra)
-        log(f"go test attempt {attempt} ({result.name}) exit code: {rc} (ignored; compared against baseline)")
-        events = load_events(result)
-        new = panicked_tests(events) - panicked
-        if not new:
-            return events
+        rc = go_test(attempt_result, race, run, skip_all, extra)
+        log(f"go test attempt {attempt} ({attempt_result.name}) exit code: {rc} (ignored; compared against baseline)")
+        events = load_events(attempt_result)
+        # Previously panicked tests were skipped above; subtract `panicked` as a guard
+        # against an infinite loop if `-skip` ever fails to match.
+        new_panics = panicked_tests(events) - panicked
+        if not new_panics:
+            return events, panicked
         log("::warning::panicking tests, re-running without them:")
-        for pkg, test in sorted(new):
+        for pkg, test in sorted(new_panics):
             log(f"{pkg} {test}")
-        panicked |= new
+        panicked |= new_panics
     log("::error::too many panicking tests")
     sys.exit(1)
 
@@ -229,12 +238,18 @@ def main():
         if not args.no_wiremock:
             services.start()
 
-        panicked = set()
         # Timing-sensitive tests run in a second pass without -race (see config.json).
-        events = run_pass(out / f"go-test-race-{OS_NAME}.jsonl", True, [args.run] if args.run else [],
-                          no_race, extra, panicked)
+        events, panicked = run_pass(
+            out / f"go-test-race-{OS_NAME}.jsonl", True,
+            [args.run] if args.run else [], no_race, extra,
+        )
         if no_race:
-            events += run_pass(out / f"go-test-norace-{OS_NAME}.jsonl", False, no_race, [], extra, panicked)
+            no_race_events, no_race_panicked = run_pass(
+                out / f"go-test-norace-{OS_NAME}.jsonl", False,
+                no_race, [], extra,
+            )
+            events += no_race_events
+            panicked |= no_race_panicked
     finally:
         services.stop()
 
